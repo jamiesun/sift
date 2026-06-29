@@ -9,11 +9,12 @@ mod skills;
 
 use std::io::Write;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use clap::Parser;
 use serde::Serialize;
 
-use config::{Cli, Config};
+use config::{Cli, Config, ReportLanguage};
 
 fn main() -> ExitCode {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("doctor")) {
@@ -71,9 +72,27 @@ fn main() -> ExitCode {
 
     eprintln!("audit root: {}", cfg.root.display());
     eprintln!(
-        "concurrency: {}  max_file_bytes: {}  scan_only: {}  self_audit: {}",
-        cfg.concurrency, cfg.max_bytes, cfg.scan_only, cfg.self_audit
+        "concurrency: {}  max_file_bytes: {}  scan_only: {}  self_audit: {}  report_language: {}  debug: {}",
+        cfg.concurrency,
+        cfg.max_bytes,
+        cfg.scan_only,
+        cfg.self_audit,
+        cfg.report_language.code(),
+        cfg.debug
     );
+    if cfg.debug {
+        eprintln!("debug: ignores={}", cfg.ignores.join(","));
+        eprintln!(
+            "debug: legacy large endpoint={} model={} api_key_present={}",
+            cfg.endpoint,
+            cfg.model,
+            cfg.api_key.is_some()
+        );
+        eprintln!(
+            "debug: legacy small endpoint={} model={}",
+            cfg.small_endpoint, cfg.small_model
+        );
+    }
 
     let mut reg = if cfg.scan_only {
         None
@@ -90,9 +109,16 @@ fn main() -> ExitCode {
             r.small.len(),
             r.degraded()
         );
+        if cfg.debug {
+            for line in r.debug_summaries() {
+                eprintln!("debug: model {line}");
+            }
+        }
         Some(r)
     };
 
+    eprintln!("scan started");
+    let scan_started = Instant::now();
     let rx = scanner::spawn_scan(&cfg);
     let mut scan = ScanStats::default();
     let mut dehydrated = 0usize;
@@ -105,14 +131,17 @@ fn main() -> ExitCode {
         scan.candidate_files += 1;
         let Ok(src) = std::fs::read(&path) else {
             scan.read_failed += 1;
+            log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
             continue;
         };
         if extract::Lang::from_path(&path).is_none() {
             scan.unsupported_files += 1;
+            log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
             continue;
         }
         let Some(sum) = extract::dehydrate(&path, &src) else {
             scan.parse_failed += 1;
+            log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
             continue;
         };
         dehydrated += 1;
@@ -141,6 +170,7 @@ fn main() -> ExitCode {
             Err(_) => scan.serialization_failed += 1,
         }
         // ASTs are dropped inside dehydrate; full audits keep only compact JSONL records.
+        log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
     }
 
     eprintln!(
@@ -152,6 +182,9 @@ fn main() -> ExitCode {
         scan.parse_failed
     );
 
+    if reg.is_some() {
+        eprintln!("preparing model seed");
+    }
     let seed_batches = seed_batches(&seed_records, SEED_CAP);
     let seed = seed_records.join("\n");
     let seed_bytes = seed_batches
@@ -177,8 +210,19 @@ fn main() -> ExitCode {
             coverage.candidate_seed_bytes,
             coverage.record_truncated
         );
+        if cfg.debug {
+            let batch_bytes = seed_batches
+                .iter()
+                .map(|batch| batch.len().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!("debug: reduce_batch_bytes=[{batch_bytes}]");
+        }
     }
 
+    if reg.is_some() {
+        eprintln!("small-model Map started");
+    }
     let map_report = reg
         .as_mut()
         .map(|r| r.map_small_pool(&seed, cfg.concurrency));
@@ -186,7 +230,8 @@ fn main() -> ExitCode {
         .as_ref()
         .map(|report| report.observations.as_str())
         .unwrap_or("");
-    let react_batches = build_react_batches(&coverage, observations, &seed_batches);
+    let react_batches =
+        build_react_batches(&coverage, observations, &seed_batches, cfg.report_language);
     if let Some(report) = &map_report {
         eprintln!(
             "small-model Map complete, chunks_total: {}  succeeded: {}  failed: {}  attempts: {}  retries: {}  skipped_no_model: {}  observation_bytes: {}",
@@ -199,12 +244,16 @@ fn main() -> ExitCode {
             report.observations.len()
         );
     }
-    let diagnostics = diagnostics_section(&coverage, map_report.as_ref());
+    let diagnostics = diagnostics_section(&coverage, map_report.as_ref(), cfg.report_language);
 
     // Drive ReACT only when a large model is configured.
     if let Some(large) = reg.as_mut().and_then(|r| r.large.as_mut()) {
         let mut final_reports = Vec::new();
         let mut partial_reports = Vec::new();
+        eprintln!(
+            "large-model Reduce started, batches: {}",
+            react_batches.len()
+        );
         for (idx, react_seed) in react_batches.iter().enumerate() {
             eprintln!(
                 "large-model Reduce batch {}/{} seed_bytes={}",
@@ -212,12 +261,19 @@ fn main() -> ExitCode {
                 react_batches.len(),
                 react_seed.len()
             );
-            match react::ReAct::default().run(large, react_seed) {
-                react::Outcome::Final(rep) => final_reports.push(BatchReport {
-                    idx,
-                    bytes: react_seed.len(),
-                    markdown: rep,
-                }),
+            match react::ReAct::with_language(cfg.report_language).run(large, react_seed) {
+                react::Outcome::Final(rep) => {
+                    eprintln!(
+                        "large-model Reduce batch {}/{} complete",
+                        idx + 1,
+                        react_batches.len()
+                    );
+                    final_reports.push(BatchReport {
+                        idx,
+                        bytes: react_seed.len(),
+                        markdown: rep,
+                    });
+                }
                 react::Outcome::Partial(rep) => {
                     eprintln!(
                         "partial result in Reduce batch {}/{}: {rep}",
@@ -234,18 +290,22 @@ fn main() -> ExitCode {
         }
         if partial_reports.is_empty() {
             println!(
-                "\n# Audit Result\n\n{}\n\n{}\n\n{}",
-                coverage.markdown_section(),
+                "\n# {}\n\n{}\n\n{}\n\n{}",
+                audit_result_heading(cfg.report_language),
+                coverage.markdown_section(cfg.report_language),
                 diagnostics,
-                render_batch_reports(&final_reports)
+                render_batch_reports(&final_reports, cfg.report_language)
             );
         } else {
             println!(
-                "\n# Incomplete Audit\n\nOne or more large-model Reduce batches failed or hit a bound. This output is not a completed audit verdict.\n\n{}\n\n{}\n\n{}\n\n## Local Deterministic Fallback\n\n{}",
-                coverage.markdown_section(),
+                "\n# {}\n\n{}\n\n{}\n\n{}\n\n{}\n\n## {}\n\n{}",
+                incomplete_audit_heading(cfg.report_language),
+                incomplete_audit_notice(cfg.report_language),
+                coverage.markdown_section(cfg.report_language),
                 diagnostics,
-                render_partial_reports(&final_reports, &partial_reports),
-                report::markdown_from_seed(&seed)
+                render_partial_reports(&final_reports, &partial_reports, cfg.report_language),
+                local_fallback_heading(cfg.report_language),
+                report::markdown_from_seed_with_language(&seed, cfg.report_language)
             );
             return ExitCode::FAILURE;
         }
@@ -288,19 +348,38 @@ impl InputCoverage {
         )
     }
 
-    fn markdown_section(&self) -> String {
+    fn markdown_section(&self, language: ReportLanguage) -> String {
         let status = if self.record_truncated > 0 {
             "COMPLETE_WITH_RECORD_COMPRESSION"
         } else {
             "COMPLETE"
         };
         let scope_note = if self.record_truncated > 0 {
-            "\n\nResult scope: all compact records were batched; some oversized records were compressed further."
+            match language {
+                ReportLanguage::En => {
+                    "\n\nResult scope: all compact records were batched; some oversized records were compressed further."
+                }
+                ReportLanguage::Zh => {
+                    "\n\n\u{7ed3}\u{679c}\u{8303}\u{56f4}\u{ff1a}\u{6240}\u{6709}\u{7d27}\u{51d1}\u{8bb0}\u{5f55}\u{5747}\u{5df2}\u{5206}\u{6279}\u{ff1b}\u{90e8}\u{5206}\u{8d85}\u{5927}\u{8bb0}\u{5f55}\u{8fdb}\u{4e00}\u{6b65}\u{538b}\u{7f29}\u{3002}"
+                }
+            }
         } else {
             ""
         };
+        let heading = match language {
+            ReportLanguage::En => "Input Coverage",
+            ReportLanguage::Zh => "\u{8f93}\u{5165}\u{8986}\u{76d6}",
+        };
+        let table_header = match language {
+            ReportLanguage::En => {
+                "| Status | Candidate Files | Dehydrated Files | Model Records | Reduce Batches | Seed Bytes | Candidate Seed Bytes | Cap Bytes | Record Truncated |\n"
+            }
+            ReportLanguage::Zh => {
+                "|\u{72b6}\u{6001}|\u{5019}\u{9009}\u{6587}\u{4ef6}|\u{8131}\u{6c34}\u{6587}\u{4ef6}|\u{6a21}\u{578b}\u{8bb0}\u{5f55}|Reduce \u{6279}\u{6b21}|Seed \u{5b57}\u{8282}|\u{5019}\u{9009} Seed \u{5b57}\u{8282}|\u{4e0a}\u{9650}\u{5b57}\u{8282}|\u{8bb0}\u{5f55}\u{622a}\u{65ad}|\n"
+            }
+        };
         format!(
-            "## Input Coverage\n\n| Status | Candidate Files | Dehydrated Files | Model Records | Reduce Batches | Seed Bytes | Candidate Seed Bytes | Cap Bytes | Record Truncated |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|\n| {status} | {} | {} | {} | {} | {} | {} | {} | {} |{scope_note}",
+            "## {heading}\n\n{table_header}|---|---:|---:|---:|---:|---:|---:|---:|---:|\n| {status} | {} | {} | {} | {} | {} | {} | {} | {} |{scope_note}",
             self.scan.candidate_files,
             self.dehydrated,
             self.seeded,
@@ -313,8 +392,15 @@ impl InputCoverage {
     }
 }
 
-fn diagnostics_section(coverage: &InputCoverage, map: Option<&model::MapReport>) -> String {
-    let mut s = String::from("## Diagnostics\n\n");
+fn diagnostics_section(
+    coverage: &InputCoverage,
+    map: Option<&model::MapReport>,
+    language: ReportLanguage,
+) -> String {
+    let mut s = match language {
+        ReportLanguage::En => String::from("## Diagnostics\n\n"),
+        ReportLanguage::Zh => String::from("## \u{8bca}\u{65ad}\n\n"),
+    };
     s.push_str("| Area | Metric | Value |\n");
     s.push_str("|---|---|---:|\n");
     s.push_str(&format!(
@@ -515,17 +601,25 @@ fn build_react_batches(
     coverage: &InputCoverage,
     observations: &str,
     seed_batches: &[String],
+    language: ReportLanguage,
 ) -> Vec<String> {
     if seed_batches.is_empty() {
-        return vec![format!("{}\n\nAST_SEED:\n", coverage.model_context())];
+        return vec![format!(
+            "{}\n- report_language: {}\n- report_language_instruction: {}\n\nAST_SEED:\n",
+            coverage.model_context(),
+            language.code(),
+            language.prompt_instruction()
+        )];
     }
     seed_batches
         .iter()
         .enumerate()
         .map(|(idx, batch)| {
             let batch_context = format!(
-                "{}\n- current_reduce_batch: {}\n- reduce_batches_total: {}\n- current_batch_seed_bytes: {}",
+                "{}\n- report_language: {}\n- report_language_instruction: {}\n- current_reduce_batch: {}\n- reduce_batches_total: {}\n- current_batch_seed_bytes: {}",
                 coverage.model_context(),
+                language.code(),
+                language.prompt_instruction(),
                 idx + 1,
                 seed_batches.len(),
                 batch.len()
@@ -547,17 +641,24 @@ struct BatchReport {
     markdown: String,
 }
 
-fn render_batch_reports(reports: &[BatchReport]) -> String {
+fn render_batch_reports(reports: &[BatchReport], language: ReportLanguage) -> String {
     if reports.len() == 1 {
         return reports
             .first()
             .map(|report| report.markdown.clone())
             .unwrap_or_default();
     }
-    let mut s = String::from("## Batched Reduce Results\n\n");
+    let mut s = match language {
+        ReportLanguage::En => String::from("## Batched Reduce Results\n\n"),
+        ReportLanguage::Zh => String::from("## \u{5206}\u{6279} Reduce \u{7ed3}\u{679c}\n\n"),
+    };
     for report in reports {
+        let batch_label = match language {
+            ReportLanguage::En => "Batch",
+            ReportLanguage::Zh => "\u{6279}\u{6b21}",
+        };
         s.push_str(&format!(
-            "### Batch {} ({} bytes)\n\n{}\n\n",
+            "### {batch_label} {} ({} bytes)\n\n{}\n\n",
             report.idx + 1,
             report.bytes,
             report.markdown
@@ -566,18 +667,37 @@ fn render_batch_reports(reports: &[BatchReport]) -> String {
     s
 }
 
-fn render_partial_reports(finals: &[BatchReport], partials: &[BatchReport]) -> String {
-    let mut s = String::from("## Reduce Batch Status\n\n");
+fn render_partial_reports(
+    finals: &[BatchReport],
+    partials: &[BatchReport],
+    language: ReportLanguage,
+) -> String {
+    let mut s = match language {
+        ReportLanguage::En => String::from("## Reduce Batch Status\n\n"),
+        ReportLanguage::Zh => String::from("## Reduce \u{6279}\u{6b21}\u{72b6}\u{6001}\n\n"),
+    };
     if !finals.is_empty() {
-        s.push_str("### Completed Batches\n\n");
-        s.push_str(&render_batch_reports(finals));
+        s.push_str(match language {
+            ReportLanguage::En => "### Completed Batches\n\n",
+            ReportLanguage::Zh => "### \u{5df2}\u{5b8c}\u{6210}\u{6279}\u{6b21}\n\n",
+        });
+        s.push_str(&render_batch_reports(finals, language));
         s.push('\n');
     }
     if !partials.is_empty() {
-        s.push_str("### Failed Or Partial Batches\n\n");
+        s.push_str(match language {
+            ReportLanguage::En => "### Failed Or Partial Batches\n\n",
+            ReportLanguage::Zh => {
+                "### \u{5931}\u{8d25}\u{6216}\u{90e8}\u{5206}\u{5b8c}\u{6210}\u{6279}\u{6b21}\n\n"
+            }
+        });
+        let batch_label = match language {
+            ReportLanguage::En => "Batch",
+            ReportLanguage::Zh => "\u{6279}\u{6b21}",
+        };
         for report in partials {
             s.push_str(&format!(
-                "- Batch {} ({} bytes): `{}`\n",
+                "- {batch_label} {} ({} bytes): `{}`\n",
                 report.idx + 1,
                 report.bytes,
                 escape_markdown_cell(&report.markdown)
@@ -585,6 +705,56 @@ fn render_partial_reports(finals: &[BatchReport], partials: &[BatchReport]) -> S
         }
     }
     s
+}
+
+fn should_log_scan_progress(candidate_files: usize, debug: bool) -> bool {
+    let interval = if debug { 25 } else { 100 };
+    candidate_files > 0 && candidate_files.is_multiple_of(interval)
+}
+
+fn log_scan_progress(scan: &ScanStats, dehydrated: usize, started: Instant, debug: bool) {
+    if should_log_scan_progress(scan.candidate_files, debug) {
+        eprintln!(
+            "scan progress: candidate_files: {}  dehydrated_files: {}  unsupported_files: {}  parse_failed: {}  elapsed_ms: {}",
+            scan.candidate_files,
+            dehydrated,
+            scan.unsupported_files,
+            scan.parse_failed,
+            started.elapsed().as_millis()
+        );
+    }
+}
+
+fn audit_result_heading(language: ReportLanguage) -> &'static str {
+    match language {
+        ReportLanguage::En => "Audit Result",
+        ReportLanguage::Zh => "\u{5ba1}\u{8ba1}\u{7ed3}\u{679c}",
+    }
+}
+
+fn incomplete_audit_heading(language: ReportLanguage) -> &'static str {
+    match language {
+        ReportLanguage::En => "Incomplete Audit",
+        ReportLanguage::Zh => "\u{672a}\u{5b8c}\u{6210}\u{5ba1}\u{8ba1}",
+    }
+}
+
+fn incomplete_audit_notice(language: ReportLanguage) -> &'static str {
+    match language {
+        ReportLanguage::En => {
+            "One or more large-model Reduce batches failed or hit a bound. This output is not a completed audit verdict."
+        }
+        ReportLanguage::Zh => {
+            "\u{4e00}\u{4e2a}\u{6216}\u{591a}\u{4e2a}\u{5927}\u{6a21}\u{578b} Reduce \u{6279}\u{6b21}\u{5931}\u{8d25}\u{6216}\u{89e6}\u{8fbe}\u{8fb9}\u{754c}\u{3002}\u{6b64}\u{8f93}\u{51fa}\u{4e0d}\u{662f}\u{5b8c}\u{6574}\u{5ba1}\u{8ba1}\u{7ed3}\u{8bba}\u{3002}"
+        }
+    }
+}
+
+fn local_fallback_heading(language: ReportLanguage) -> &'static str {
+    match language {
+        ReportLanguage::En => "Local Deterministic Fallback",
+        ReportLanguage::Zh => "\u{672c}\u{5730}\u{786e}\u{5b9a}\u{6027}\u{56de}\u{9000}",
+    }
 }
 
 #[cfg(test)]
@@ -660,12 +830,33 @@ mod tests {
         };
         let seed = vec!["one\n".to_string(), "two\n".to_string()];
 
-        let prompts = build_react_batches(&coverage, "[]", &seed);
+        let prompts = build_react_batches(&coverage, "[]", &seed, ReportLanguage::En);
 
         assert_eq!(prompts.len(), 2);
         assert!(prompts[0].contains("current_reduce_batch: 1"));
+        assert!(prompts[0].contains("report_language: en"));
         assert!(prompts[0].contains("AST_SEED_BATCH:\none\n"));
         assert!(prompts[1].contains("current_reduce_batch: 2"));
         assert!(prompts[1].contains("AST_SEED_BATCH:\ntwo\n"));
+    }
+
+    #[test]
+    fn localized_headings_render_for_zh() {
+        let coverage = InputCoverage {
+            scan: ScanStats {
+                candidate_files: 1,
+                ..Default::default()
+            },
+            dehydrated: 1,
+            seeded: 1,
+            seed_bytes: 1,
+            candidate_seed_bytes: 1,
+            seed_cap: 8,
+            record_truncated: 0,
+            batches: 1,
+        };
+
+        let section = coverage.markdown_section(ReportLanguage::Zh);
+        assert!(section.contains("\u{8f93}\u{5165}\u{8986}\u{76d6}"));
     }
 }

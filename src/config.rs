@@ -4,7 +4,7 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use crate::model::{ModelClient, ModelSpec, Registry, Role, UreqTransport};
 
@@ -92,9 +92,39 @@ pub struct Cli {
     #[arg(long)]
     pub scan_only: bool,
 
+    /// Markdown report language
+    #[arg(long, alias = "report-lang", value_enum, default_value = "en")]
+    pub report_language: ReportLanguage,
+
+    /// Print extra diagnostic progress to stderr
+    #[arg(long)]
+    pub debug: bool,
+
     /// Run local self-audit and write reports/self-audit.md
     #[arg(long)]
     pub self_audit: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReportLanguage {
+    En,
+    Zh,
+}
+
+impl ReportLanguage {
+    pub fn code(self) -> &'static str {
+        match self {
+            ReportLanguage::En => "en",
+            ReportLanguage::Zh => "zh",
+        }
+    }
+
+    pub fn prompt_instruction(self) -> &'static str {
+        match self {
+            ReportLanguage::En => "Write the final Markdown report in English.",
+            ReportLanguage::Zh => "Write the final Markdown report in Simplified Chinese.",
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -136,6 +166,8 @@ pub struct Config {
     pub small_model: String,
     pub timeout_ms: u64,
     pub max_retries: u32,
+    pub report_language: ReportLanguage,
+    pub debug: bool,
     pub self_audit: bool,
     models: Vec<FileModelConfig>,
     env_file: BTreeMap<String, String>,
@@ -209,6 +241,8 @@ impl Config {
                 .and_then(|v| u32::try_from(v).ok())
                 .or(file.max_retries)
                 .unwrap_or(1),
+            report_language: cli.report_language,
+            debug: cli.debug,
             self_audit: cli.self_audit,
             models: file.models,
             env_file,
@@ -970,6 +1004,18 @@ max_retries=2
     }
 
     #[test]
+    fn cli_parses_report_language_and_debug() {
+        let parsed = Cli::try_parse_from(["sift", "--report-language", "zh", "--debug"]);
+        assert!(parsed.is_ok());
+        let cli = match parsed {
+            Ok(cli) => cli,
+            Err(_) => return,
+        };
+        assert_eq!(cli.report_language, ReportLanguage::Zh);
+        assert!(cli.debug);
+    }
+
+    #[test]
     fn missing_key_hint_uses_parseable_model_block() {
         let hint = missing_large_key_hint();
         assert!(hint.contains("[[model]]\n    role = \"large\""));
@@ -1039,6 +1085,8 @@ model = "gpt-oss"
             small_model: DEFAULT_SMALL_MODEL.to_string(),
             timeout_ms: 1,
             max_retries: 0,
+            report_language: ReportLanguage::En,
+            debug: false,
             self_audit: false,
             models: file.models,
             env_file: BTreeMap::new(),
@@ -1060,6 +1108,8 @@ model = "gpt-oss"
             concurrency: None,
             max_bytes: None,
             scan_only: true,
+            report_language: ReportLanguage::En,
+            debug: false,
             self_audit: false,
         };
         let err = Config::resolve(cli).err().map(|e| e.to_string());
@@ -1079,6 +1129,8 @@ model = "gpt-oss"
             concurrency: None,
             max_bytes: None,
             scan_only: true,
+            report_language: ReportLanguage::En,
+            debug: false,
             self_audit: false,
         };
         let cfg = Config::resolve(cli).unwrap_or_else(|_| Config {
@@ -1094,6 +1146,8 @@ model = "gpt-oss"
             small_model: String::new(),
             timeout_ms: 1,
             max_retries: 0,
+            report_language: ReportLanguage::En,
+            debug: false,
             self_audit: false,
             models: Vec::new(),
             env_file: BTreeMap::new(),

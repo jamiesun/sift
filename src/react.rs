@@ -1,3 +1,4 @@
+use crate::config::ReportLanguage;
 use crate::model::{CallError, ModelClient};
 use crate::skills::Skill;
 
@@ -21,6 +22,7 @@ pub enum Outcome {
 pub struct ReAct {
     max_steps: u32,
     max_errors: u32,
+    report_language: ReportLanguage,
 }
 
 impl Default for ReAct {
@@ -28,6 +30,7 @@ impl Default for ReAct {
         Self {
             max_steps: 8,
             max_errors: 3,
+            report_language: ReportLanguage::En,
         }
     }
 }
@@ -38,12 +41,20 @@ impl ReAct {
         Self {
             max_steps: max_steps.max(1),
             max_errors: max_errors.max(1),
+            report_language: ReportLanguage::En,
+        }
+    }
+
+    pub fn with_language(report_language: ReportLanguage) -> Self {
+        Self {
+            report_language,
+            ..Self::default()
         }
     }
 
     /// Run until <FINAL>; bounded steps/errors return a partial result instead of looping.
     pub fn run(&self, m: &mut dyn Completer, seed: &str) -> Outcome {
-        let mut prompt = initial_prompt(seed);
+        let mut prompt = initial_prompt(seed, self.report_language);
         let mut errors = 0u32;
         let mut last = String::new();
         for _ in 0..self.max_steps {
@@ -57,9 +68,9 @@ impl ReAct {
             match extract(&reply, "TOOL_CALL").and_then(|j| parse_call(&j)) {
                 Some((skill, input)) => {
                     let tool_input = resolve_tool_input(&input, seed);
-                    let obs = skill.run(tool_input);
+                    let obs = skill.run_with_language(tool_input, self.report_language);
                     last = obs.clone();
-                    prompt = observation_prompt(&obs);
+                    prompt = observation_prompt(&obs, self.report_language);
                 }
                 None => {
                     errors += 1;
@@ -75,20 +86,22 @@ impl ReAct {
     }
 }
 
-fn initial_prompt(seed: &str) -> String {
+fn initial_prompt(seed: &str, report_language: ReportLanguage) -> String {
     format!(
         "You are sift's audit convergence model. Return exactly one of these formats:\n\
          1. <TOOL_CALL>{{\"skill\":\"coarse_filter\",\"input\":\"$SEED\"}}</TOOL_CALL>\n\
          2. <FINAL>Markdown risk ledger</FINAL>\n\
-         Available skills: coarse_filter and converge. To analyze the AST seed below, first call coarse_filter with input=\"$SEED\". After JSON findings, call converge or return FINAL.\n\
-         AST seed(JSONL):\n{seed}"
+         Available skills: coarse_filter and converge. To analyze the AST seed below, first call coarse_filter with input=\"$SEED\". After JSON findings, call converge or return FINAL. {}\n\
+         AST seed(JSONL):\n{seed}",
+        report_language.prompt_instruction()
     )
 }
 
-fn observation_prompt(obs: &str) -> String {
+fn observation_prompt(obs: &str, report_language: ReportLanguage) -> String {
     format!(
         "OBSERVATION:\n{obs}\n\
-         Next return only <TOOL_CALL>{{\"skill\":\"converge\",\"input\":\"the OBSERVATION text above or $SEED\"}}</TOOL_CALL> or <FINAL>Markdown risk ledger</FINAL>."
+         Next return only <TOOL_CALL>{{\"skill\":\"converge\",\"input\":\"the OBSERVATION text above or $SEED\"}}</TOOL_CALL> or <FINAL>Markdown risk ledger</FINAL>. {}",
+        report_language.prompt_instruction()
     )
 }
 
@@ -161,10 +174,16 @@ mod tests {
 
     #[test]
     fn initial_prompt_declares_tool_protocol() {
-        let p = initial_prompt("seed");
+        let p = initial_prompt("seed", ReportLanguage::En);
         assert!(p.contains("<TOOL_CALL>"));
         assert!(p.contains("\"$SEED\""));
         assert!(p.contains("<FINAL>"));
+    }
+
+    #[test]
+    fn initial_prompt_declares_report_language() {
+        let p = initial_prompt("seed", ReportLanguage::Zh);
+        assert!(p.contains("Simplified Chinese"));
     }
 
     #[test]

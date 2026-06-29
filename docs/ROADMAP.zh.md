@@ -14,7 +14,7 @@
 - 架构图
 
 ```text
-  CLI key file / ENV / config.toml ──(降级寻址, 缺 Key 即退)
+  CLI key file / ENV / ~/.sift/config.toml ──(降级寻址, 缺 Key 即退)
         ▼
   扫描层  ignore::Walk → 有界 channel(消费即丢)         [P0 ✓]
         ▼
@@ -33,7 +33,7 @@
 
 ## 项目画像（目标状态）
 
-- **零摩擦冷启动。** `sift ./repo --scan-only` 直接跑；缺配置不打断、不交互追问；缺 Key 立退给注入提示。
+- **零摩擦冷启动。** `sift ./repo --scan-only` 直接跑；缺 `~/.sift/config.toml` 时自动创建不含密钥的默认配置；不交互追问；缺 Key 立退给注入提示。
 - **成本可控可预算。** token 主要花在小模型；大模型只收脱水骨架。用户能预判审一个百兆库的花费。
 - **大小模型协同调度。** ReACT 状态机把粗筛(小)与收敛(大)编排成一条链，技能是编译期写死的本地函数。
 - **多模型 + 并发提速。** 可配置多个模型端点，小模型池并发跑 Map；大模型单点收敛。
@@ -90,6 +90,7 @@ timeout_ms = 60000
 max_retries = 1
 ```
 寻址降级：CLI key file > ENV > toml > 默认；无 large key 即退。小模型缺失可降级为纯 AST 兜底。
+默认用户配置路径为 `~/.sift/config.toml`；首次运行从等价于 `config.example.toml` 的安全默认值创建，不能写入明文密钥。
 
 ## 超时熔断与恢复（绝不死磕）
 
@@ -103,7 +104,7 @@ max_retries = 1
 - 标记完成的阶段必须有行为级证据，不能只有类型接线或 happy-path 单测。
 - 完整审计 stdout 是最终报告流；`--scan-only` 是 JSONL 流；诊断信息不得进入 stdout。
 - 报告必须披露输入覆盖：扫描、脱水、送入模型、跳过、截断的规模。
-- 配置文件属于信任边界。配置文件存在但无效时，进程必须失败，不能退回默认值。
+- 配置文件属于信任边界。用户配置缺失时从安全默认值自动创建；配置文件存在但无效时，进程必须失败，不能退回默认值。
 - `src/` 下程序源码的运行时文本、prompt 和注释只用英文；双语文档保留在 docs。
 
 ## 阶段路线图
@@ -116,7 +117,7 @@ max_retries = 1
 - 门禁：`cargo build` 绿 / 0 unwrap / `--scan-only` 能扫 / 缺 Key exit1。
 
 ### P1 零阶 AST 脱水 — 已完成 ✓
-- 功能：tree-sitter 接 Rust+Python，提签名/import/调用，输出扁平 AstSummary JSON；跨界打 `[EXTERNAL_BLACKBOX]`；解析即 drop。
+- 功能：tree-sitter 接 Rust/Python/Go/JavaScript/TypeScript/HTML/CSS/Zig/Bash/Dart/Kotlin/Java/C/C++/C#/PHP/Swift/Ruby/SQL/Dockerfile/YAML/HCL/Vue/Svelte，提签名/import/调用，输出扁平 AstSummary JSON；跨界打 `[EXTERNAL_BLACKBOX]`；解析即 drop。
 - 边界：丢注释与代码体；遇到残缺语法不 panic，并在下游报告披露覆盖不完整；不评价质量。
 - 门禁：百兆库内存稳定低位、坏文件不崩；extract.rs 单测覆盖典型/残缺样本。
 
@@ -140,12 +141,12 @@ max_retries = 1
 - 门禁：本地自审硬规则无 FAIL/WARN，包括无 broad dead-code allow、无中文源码字符串/注释、报告流边界干净、seed 截断可见。
 
 ### P6 发布加固
-- 功能：ReleaseSmall 单二进制、多语法扩展、JSON 输出稳定。
-- 门禁：单文件分发、自审 PASS、文档↔功能一致。
+- 功能：ReleaseSafe 单二进制、Makefile 安装路径、macOS Homebrew tap 发布、多语法扩展、JSON 输出稳定。
+- 门禁：单文件分发、自审 PASS、文档↔功能一致，`brew install jamiesun/tap/sift` 由 release checksum 支撑。
 
 ## 完成的样子
 
-- 空配置可跑，缺 Key 即退给提示；不挂起。
+- 空配置可跑，自动创建 `~/.sift/config.toml`，缺 Key 即退给提示；不挂起。
 - 百兆库内存稳定、扫坏不崩。
 - 报表定位行号、含跨模块依赖与并发/资源风险，可直接拍板。
 - 报表声明输入覆盖和截断状态；覆盖不完整时绝不能看起来像完整结论。

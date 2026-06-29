@@ -16,8 +16,44 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for full design.
 sift ./repo --scan-only        # scan layer only (no key needed)
 sift ./repo --module src        # audit a submodule
 SIFT_API_KEY=<KEY> sift ./repo  # full pipeline
-sift ./repo --api-key-file ~/.config/sift/key
+sift ./repo --api-key-file ~/.sift/key
+sift doctor                    # check config, key_env, and endpoint/key mismatches
 sift ./repo --self-audit        # local P5 gate, no model key needed
+```
+
+On first run, sift creates `~/.sift/config.toml` from the built-in default
+template. The default file contains only non-secret settings; put model keys in
+environment variables or pass `--api-key-file`.
+
+## Supported Languages
+
+The scan layer currently dehydrates Rust, Python, Go, JavaScript, TypeScript/TSX,
+HTML, CSS, Zig, Bash-compatible shell files (`.sh`, `.bash`, `.zsh`), Dart,
+Kotlin, Java, C/C++, C#, PHP, Swift, Ruby, SQL, Dockerfile/Containerfile, YAML,
+HCL/Terraform, Vue, and Svelte.
+
+## Install
+
+Build from source:
+
+```sh
+make ci
+make install
+```
+
+Install local git hooks:
+
+```sh
+make githooks-install
+```
+
+The pre-commit hook runs `make local-ci` before each commit. To bypass it for an
+intentional emergency commit, run `SIFT_SKIP_LOCAL_CI=1 git commit ...`.
+
+macOS releases are published through the existing tap:
+
+```sh
+brew install jamiesun/tap/sift
 ```
 
 ## Status

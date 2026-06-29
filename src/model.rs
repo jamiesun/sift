@@ -201,6 +201,7 @@ pub struct MapReport {
     pub chunks_failed: usize,
     pub attempts_total: usize,
     pub retry_attempts: usize,
+    pub skipped_no_model: bool,
 }
 
 impl Registry {
@@ -216,10 +217,16 @@ impl Registry {
     pub fn map_small_pool(&mut self, seed: &str, max_parallel: usize) -> MapReport {
         let chunks = seed_chunks(seed, 16 * 1024);
         let chunks_total = chunks.len();
-        if self.small.is_empty() || seed.trim().is_empty() {
+        if seed.trim().is_empty() {
             return MapReport {
                 chunks_total,
-                chunks_failed: chunks_total,
+                ..Default::default()
+            };
+        }
+        if self.small.is_empty() {
+            return MapReport {
+                chunks_total,
+                skipped_no_model: true,
                 ..Default::default()
             };
         }
@@ -284,6 +291,7 @@ impl Registry {
             chunks_failed: pending.len(),
             attempts_total,
             retry_attempts,
+            skipped_no_model: false,
         }
     }
 }
@@ -344,11 +352,19 @@ impl Transport for UreqTransport {
         body: &str,
         timeout: Duration,
     ) -> Result<String, TransportError> {
-        let resp = ureq::post(endpoint)
+        let mut req = ureq::post(endpoint)
             .timeout(timeout)
-            .set("authorization", &format!("Bearer {key}"))
-            .set("content-type", "application/json")
-            .send_string(body);
+            .set("content-type", "application/json");
+        let bearer;
+        if key.is_empty() {
+            // Local OpenAI-compatible servers such as Ollama do not require auth.
+        } else if uses_api_key_header(endpoint) {
+            req = req.set("api-key", key);
+        } else {
+            bearer = format!("Bearer {key}");
+            req = req.set("authorization", &bearer);
+        }
+        let resp = req.send_string(body);
         match resp {
             Ok(r) => r.into_string().map_err(|_| TransportError::BadBody),
             Err(ureq::Error::Status(code, _)) => Err(TransportError::Status(code)),
@@ -358,6 +374,10 @@ impl Transport for UreqTransport {
             }),
         }
     }
+}
+
+fn uses_api_key_header(endpoint: &str) -> bool {
+    endpoint.contains(".openai.azure.com") || endpoint.contains(".cognitiveservices.azure.com")
 }
 
 #[cfg(test)]
@@ -396,6 +416,19 @@ mod tests {
     }
     fn ok_body() -> String {
         "{\"choices\":[{\"message\":{\"content\":\"hi\"}}]}".into()
+    }
+
+    #[test]
+    fn azure_endpoints_use_api_key_header() {
+        assert!(uses_api_key_header(
+            "https://example.openai.azure.com/openai/v1/chat/completions"
+        ));
+        assert!(uses_api_key_header(
+            "https://example.cognitiveservices.azure.com/openai/v1/chat/completions"
+        ));
+        assert!(!uses_api_key_header(
+            "https://api.openai.com/v1/chat/completions"
+        ));
     }
 
     #[test]
@@ -458,6 +491,19 @@ mod tests {
         let report = reg.map_small_pool("line1\nline2\n", 2);
         assert!(report.observations.contains("hi"));
         assert_eq!(report.chunks_failed, 0);
+    }
+
+    #[test]
+    fn small_pool_without_model_is_skipped_not_failed() {
+        let mut reg = Registry {
+            small: Vec::new(),
+            large: None,
+        };
+        let report = reg.map_small_pool("line1\n", 2);
+        assert_eq!(report.chunks_total, 1);
+        assert_eq!(report.chunks_failed, 0);
+        assert_eq!(report.attempts_total, 0);
+        assert!(report.skipped_no_model);
     }
 
     #[test]

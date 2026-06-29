@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: macos-amd64
+            os: macos-15-intel
+          - asset: macos-arm64
+            os: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Setup Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Create archive
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME//\//-}"
+          archive="sift-${version}-${{ matrix.asset }}.tar.gz"
+
+          mkdir -p dist/sift
+          cp target/release/sift dist/sift/
+          cp README.md config.example.toml dist/sift/
+          cp -R docs dist/sift/docs
+          tar -C dist -czf "${archive}" sift
+          shasum -a 256 "${archive}" > "${archive}.sha256"
+
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+          echo "checksum=${archive}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sift-${{ matrix.asset }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+
+  publish:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist-artifacts
+
+      - name: Create release with all assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t files < <(find dist-artifacts -type f | sort)
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+            --draft \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+  homebrew:
+    name: Update Homebrew tap
+    runs-on: ubuntu-latest
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      HOMEBREW_TAP_REPO: jamiesun/homebrew-tap
+    steps:
+      - name: Download release artifacts
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist-artifacts
+
+      - name: Render and push formula
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
+          base="https://github.com/jamiesun/sift/releases/download/${TAG}"
+
+          sha() {
+            local f
+            f="$(find dist-artifacts -name "$1.sha256" -print -quit)"
+            [ -n "$f" ] || { echo "missing checksum for $1" >&2; exit 1; }
+            awk '{print $1; exit}' "$f"
+          }
+
+          ARM_SHA="$(sha "sift-${TAG}-macos-arm64.tar.gz")"
+          AMD_SHA="$(sha "sift-${TAG}-macos-amd64.tar.gz")"
+
+          git clone --depth 1 \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+
+          cat > tap/Formula/sift.rb <<EOF
+          class Sift < Formula
+            desc "Cost-controlled open-source project auditor"
+            homepage "https://github.com/jamiesun/sift"
+            version "${VERSION}"
+            license :cannot_represent
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${base}/sift-${TAG}-macos-arm64.tar.gz"
+                sha256 "${ARM_SHA}"
+              else
+                url "${base}/sift-${TAG}-macos-amd64.tar.gz"
+                sha256 "${AMD_SHA}"
+              end
+            end
+
+            def install
+              bin.install "sift"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/sift --version")
+            end
+          end
+          EOF
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/sift.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date for ${VERSION}"
+          else
+            git commit -m "sift ${VERSION}"
+            git push
+          fi

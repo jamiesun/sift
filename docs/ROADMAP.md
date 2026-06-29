@@ -14,7 +14,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 - Architecture
 
 ```text
-  CLI key file / ENV / config.toml ──(fallback resolve, exit if no key)
+  CLI key file / ENV / ~/.sift/config.toml ──(fallback resolve, exit if no key)
         ▼
   Scan      ignore::Walk → bounded channel (consume & drop)        [P0 ✓]
         ▼
@@ -33,7 +33,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 
 ## Project Profile (target state)
 
-- **Zero-friction cold start.** `sift ./repo --scan-only` just runs; no interactive prompts; exits with an injection hint if the key is missing.
+- **Zero-friction cold start.** `sift ./repo --scan-only` just runs; missing `~/.sift/config.toml` is created with non-secret defaults; no interactive prompts; exits with an injection hint if the key is missing.
 - **Cost-controlled & budgetable.** Tokens mostly spent on small models; the large model only sees the dehydrated skeleton.
 - **Big/small co-scheduling.** A ReACT state machine chains coarse filter (small) and convergence (large); skills are compile-time local functions.
 - **Multi-model + concurrency.** Multiple endpoints configurable; small-model pool runs Map concurrently; large model converges once.
@@ -90,6 +90,7 @@ timeout_ms = 60000
 max_retries = 1
 ```
 Resolve order: CLI key file > ENV > toml > default; no large key ⇒ exit. Missing small model degrades to AST-only fallback.
+The default user config path is `~/.sift/config.toml`; it is created on first run from `config.example.toml`-equivalent defaults and must not contain raw secrets.
 
 ## Timeout, breaker & recovery (never grind)
 
@@ -103,7 +104,7 @@ Resolve order: CLI key file > ENV > toml > default; no large key ⇒ exit. Missi
 - A phase marked done must have behavior-level proof, not only type-level plumbing or happy-path unit tests.
 - Full audit stdout is the final report stream. `--scan-only` is the JSONL stream. Diagnostics stay off stdout.
 - Report coverage must disclose how much input was scanned, dehydrated, sent to models, skipped, or truncated.
-- Config files are part of the trust boundary. If a config file exists but is invalid, the process fails instead of reverting to defaults.
+- Config files are part of the trust boundary. Missing user config is auto-created from safe defaults; if a config file exists but is invalid, the process fails instead of reverting to defaults.
 - Program source under `src/` is English-only for runtime text, prompts, and comments; bilingual documentation stays in docs.
 
 ## Phased Roadmap
@@ -114,7 +115,7 @@ Resolve order: CLI key file > ENV > toml > default; no large key ⇒ exit. Missi
 Features: clap fallback resolve, bounded scanner, exit on missing key, minimal wiring. Bounds: no net/parse/tree. Gate: `cargo build` green, 0 unwrap, `--scan-only` scans, missing key exit1.
 
 ### P1 Tier-0 AST dehydrate — done ✓
-Features: tree-sitter Rust+Python, extract sig/import/calls → flat AstSummary JSON; cross-boundary `[EXTERNAL_BLACKBOX]`; drop AST. Bounds: omit bodies/comments; tolerate malformed syntax without panicking and account for incomplete coverage in downstream reporting. Gate: 100MB repo memory stable & no crash; extract.rs tests cover typical+broken.
+Features: tree-sitter Rust/Python/Go/JavaScript/TypeScript/HTML/CSS/Zig/Bash/Dart/Kotlin/Java/C/C++/C#/PHP/Swift/Ruby/SQL/Dockerfile/YAML/HCL/Vue/Svelte, extract sig/import/calls → flat AstSummary JSON; cross-boundary `[EXTERNAL_BLACKBOX]`; drop AST. Bounds: omit bodies/comments; tolerate malformed syntax without panicking and account for incomplete coverage in downstream reporting. Gate: 100MB repo memory stable & no crash; extract.rs tests cover typical+broken.
 
 ### P2 Model layer (multi-model + breaker) — done ✓
 Features: ModelClient trait, registry, role routing; per-call timeout, breaker, backoff. Bounds: no cache/persist; keys env/file only, never logged. Gate: timeout/bad-response simulated, breaker trips; no plaintext keys.
@@ -129,11 +130,11 @@ Features: deterministic AST coarse ledger, Markdown renderer, real `[[model]]` T
 Features: audit.rs scores trimmed dimensions; `sift . --self-audit` writes report to `reports/` (gitignored). Gate: self-audit no FAIL/WARN for hard rules, including no broad dead-code allows, no Chinese source strings/comments, clean report stream boundary, and visible seed truncation.
 
 ### P6 Release hardening
-Features: ReleaseSmall single binary, more grammars, stable JSON. Gate: single-file dist, self-audit PASS, docs↔code consistent.
+Features: ReleaseSafe single binary, Makefile install path, macOS Homebrew tap publishing, more grammars, stable JSON. Gate: single-file dist, self-audit PASS, docs↔code consistent, `brew install jamiesun/tap/sift` backed by release checksums.
 
 ## Definition of done
 
-- Zero-config run; missing key exits with hint; never hangs.
+- Zero-config run; `~/.sift/config.toml` auto-created; missing key exits with hint; never hangs.
 - 100MB repo stable memory; no crash on dirty input.
 - Report cites line numbers + cross-module deps + concurrency/resource risk.
 - Report declares input coverage and truncation state; incomplete coverage never looks like a complete verdict.

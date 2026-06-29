@@ -234,6 +234,7 @@ impl Registry {
         let wave_size = max_parallel.max(1).min(self.small.len());
         let mut pending: Vec<(usize, String)> = chunks.into_iter().enumerate().collect();
         let mut out: Vec<(usize, String)> = Vec::new();
+        let mut failed_final: Vec<usize> = Vec::new();
         let mut attempts_total = 0usize;
         let mut retry_attempts = 0usize;
 
@@ -269,7 +270,7 @@ impl Registry {
                     match result {
                         Ok((idx, Ok(text))) => out.push((idx, text)),
                         _ if pass == 0 => next_pending.push(item.clone()),
-                        _ => {}
+                        _ => failed_final.push(item.0),
                     }
                 }
 
@@ -287,8 +288,8 @@ impl Registry {
                 .collect::<Vec<_>>()
                 .join("\n---\n"),
             chunks_total,
-            chunks_succeeded: chunks_total.saturating_sub(pending.len()),
-            chunks_failed: pending.len(),
+            chunks_succeeded: chunks_total.saturating_sub(failed_final.len()),
+            chunks_failed: failed_final.len(),
             attempts_total,
             retry_attempts,
             skipped_no_model: false,
@@ -524,6 +525,27 @@ mod tests {
         assert_eq!(report.chunks_total, 1);
         assert_eq!(report.chunks_succeeded, 1);
         assert_eq!(report.chunks_failed, 0);
+        assert_eq!(report.retry_attempts, 1);
+    }
+
+    #[test]
+    fn small_pool_counts_final_retry_failures() {
+        let mut reg = Registry {
+            small: vec![ModelClient::new(
+                spec(),
+                Box::new(Fake::new(vec![
+                    Err(TransportError::Status(500)),
+                    Err(TransportError::Status(500)),
+                ])),
+                3,
+            )],
+            large: None,
+        };
+        let report = reg.map_small_pool("line1\n", 1);
+        assert_eq!(report.chunks_total, 1);
+        assert_eq!(report.chunks_succeeded, 0);
+        assert_eq!(report.chunks_failed, 1);
+        assert_eq!(report.attempts_total, 2);
         assert_eq!(report.retry_attempts, 1);
     }
 }

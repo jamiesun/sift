@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
-use serde::Deserialize;
 
 use crate::model::{ModelClient, ModelSpec, Registry, Role, UreqTransport};
 
@@ -54,7 +53,7 @@ pub struct Cli {
     pub scan_only: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default)]
 struct FileConfig {
     api_key: Option<String>,
     concurrency: Option<usize>,
@@ -64,6 +63,17 @@ struct FileConfig {
     model: Option<String>,
     small_endpoint: Option<String>,
     small_model: Option<String>,
+    timeout_ms: Option<u64>,
+    max_retries: Option<u32>,
+    models: Vec<FileModelConfig>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct FileModelConfig {
+    role: Option<Role>,
+    endpoint: Option<String>,
+    model: Option<String>,
+    key_env: Option<String>,
     timeout_ms: Option<u64>,
     max_retries: Option<u32>,
 }
@@ -82,6 +92,7 @@ pub struct Config {
     pub small_model: String,
     pub timeout_ms: u64,
     pub max_retries: u32,
+    models: Vec<FileModelConfig>,
 }
 
 impl Config {
@@ -134,37 +145,115 @@ impl Config {
                 .unwrap_or_else(|| DEFAULT_SMALL_MODEL.to_string()),
             timeout_ms: file.timeout_ms.unwrap_or(60_000),
             max_retries: file.max_retries.unwrap_or(1),
+            models: file.models,
         })
     }
 
-    /// 据降级寻址结果装配多模型注册表：large=本机 api_key，small=SIFT_SMALL_KEY。
+    /// 据降级寻址结果装配多模型注册表：[[model]] 优先，保留旧式 large/api_key + SIFT_SMALL_KEY 兜底。
     /// 缺 large 即降级（degraded=true），上层回退 AST-only，绝不阻断。
     pub fn build_registry(&self) -> Registry {
-        let timeout = std::time::Duration::from_millis(self.timeout_ms);
-        let large = self.api_key.as_ref().map(|k| {
-            let spec = ModelSpec {
-                role: Role::Large,
-                endpoint: self.endpoint.clone(),
-                model: self.model.clone(),
-                key: k.clone(),
-                timeout,
-                max_retries: self.max_retries,
-            };
-            ModelClient::new(spec, Box::new(UreqTransport), 3)
-        });
         let mut small = Vec::new();
-        if let Ok(k) = std::env::var(ENV_SMALL_KEY) {
-            let spec = ModelSpec {
-                role: Role::Small,
-                endpoint: self.small_endpoint.clone(),
-                model: self.small_model.clone(),
-                key: k,
-                timeout,
-                max_retries: self.max_retries,
+        let mut large = None;
+
+        for model in &self.models {
+            let Some(client) = self.client_from_model_config(model) else {
+                continue;
             };
-            small.push(ModelClient::new(spec, Box::new(UreqTransport), 3));
+            match client.role() {
+                Role::Small => small.push(client),
+                Role::Large if large.is_none() => large = Some(client),
+                Role::Large => {}
+            }
+        }
+
+        if large.is_none() {
+            large = self.fallback_large();
+        }
+        if let Ok(k) = std::env::var(ENV_SMALL_KEY) {
+            small.push(self.new_client(
+                Role::Small,
+                self.small_endpoint.clone(),
+                self.small_model.clone(),
+                k,
+                self.timeout_ms,
+                self.max_retries,
+            ));
         }
         Registry { small, large }
+    }
+
+    fn client_from_model_config(&self, m: &FileModelConfig) -> Option<ModelClient> {
+        let role = m.role?;
+        let key_env = m.key_env.as_ref()?;
+        let key = std::env::var(key_env).ok()?;
+        let endpoint = m
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| self.default_endpoint_for(role));
+        let model = m
+            .model
+            .clone()
+            .unwrap_or_else(|| self.default_model_for(role));
+        Some(self.new_client(
+            role,
+            endpoint,
+            model,
+            key,
+            m.timeout_ms.unwrap_or(self.timeout_ms),
+            m.max_retries.unwrap_or(self.max_retries),
+        ))
+    }
+
+    fn fallback_large(&self) -> Option<ModelClient> {
+        let key = self.api_key.clone()?;
+        let large_cfg = self.models.iter().find(|m| m.role == Some(Role::Large));
+        let endpoint = large_cfg
+            .and_then(|m| m.endpoint.clone())
+            .unwrap_or_else(|| self.endpoint.clone());
+        let model = large_cfg
+            .and_then(|m| m.model.clone())
+            .unwrap_or_else(|| self.model.clone());
+        let timeout_ms = large_cfg
+            .and_then(|m| m.timeout_ms)
+            .unwrap_or(self.timeout_ms);
+        let max_retries = large_cfg
+            .and_then(|m| m.max_retries)
+            .unwrap_or(self.max_retries);
+        Some(self.new_client(Role::Large, endpoint, model, key, timeout_ms, max_retries))
+    }
+
+    fn new_client(
+        &self,
+        role: Role,
+        endpoint: String,
+        model: String,
+        key: String,
+        timeout_ms: u64,
+        max_retries: u32,
+    ) -> ModelClient {
+        let spec = ModelSpec {
+            role,
+            endpoint,
+            model,
+            key,
+            timeout: std::time::Duration::from_millis(timeout_ms),
+            max_retries,
+        };
+        ModelClient::new(spec, Box::new(UreqTransport), 3)
+    }
+
+    fn default_endpoint_for(&self, role: Role) -> String {
+        match role {
+            Role::Small => self.small_endpoint.clone(),
+            Role::Large => self.endpoint.clone(),
+        }
+    }
+
+    fn default_model_for(&self, role: Role) -> String {
+        match role {
+            Role::Small => self.small_model.clone(),
+            Role::Large => self.model.clone(),
+        }
     }
 }
 
@@ -185,32 +274,75 @@ fn load_file_config() -> FileConfig {
         .unwrap_or_default()
 }
 
-/// 极简 key=value 解析，避免引入完整 toml 依赖；解析失败静默回退默认。
+/// 极简 key=value + [[model]] 解析，避免引入完整 toml 依赖；解析失败静默回退默认。
 fn basic_toml_parse(src: &str) -> Option<FileConfig> {
     let mut cfg = FileConfig::default();
+    let mut current_model: Option<FileModelConfig> = None;
     for line in src.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line == "[[model]]" {
+            push_model_if_valid(&mut cfg, current_model.take());
+            current_model = Some(FileModelConfig::default());
             continue;
         }
         let Some((k, v)) = line.split_once('=') else {
             continue;
         };
         let v = v.trim().trim_matches('"');
-        match k.trim() {
-            "api_key" => cfg.api_key = Some(v.to_string()),
-            "concurrency" => cfg.concurrency = v.parse().ok(),
-            "max_bytes" => cfg.max_bytes = v.parse().ok(),
-            "endpoint" => cfg.endpoint = Some(v.to_string()),
-            "model" => cfg.model = Some(v.to_string()),
-            "small_endpoint" => cfg.small_endpoint = Some(v.to_string()),
-            "small_model" => cfg.small_model = Some(v.to_string()),
-            "timeout_ms" => cfg.timeout_ms = v.parse().ok(),
-            "max_retries" => cfg.max_retries = v.parse().ok(),
-            _ => {}
+        if let Some(model) = current_model.as_mut() {
+            parse_model_key(model, k.trim(), v);
+        } else {
+            parse_root_key(&mut cfg, k.trim(), v);
         }
     }
+    push_model_if_valid(&mut cfg, current_model);
     Some(cfg)
+}
+
+fn parse_root_key(cfg: &mut FileConfig, key: &str, value: &str) {
+    match key {
+        "api_key" => cfg.api_key = Some(value.to_string()),
+        "concurrency" => cfg.concurrency = value.parse().ok(),
+        "max_bytes" => cfg.max_bytes = value.parse().ok(),
+        "endpoint" => cfg.endpoint = Some(value.to_string()),
+        "model" => cfg.model = Some(value.to_string()),
+        "small_endpoint" => cfg.small_endpoint = Some(value.to_string()),
+        "small_model" => cfg.small_model = Some(value.to_string()),
+        "timeout_ms" => cfg.timeout_ms = value.parse().ok(),
+        "max_retries" => cfg.max_retries = value.parse().ok(),
+        _ => {}
+    }
+}
+
+fn parse_model_key(model: &mut FileModelConfig, key: &str, value: &str) {
+    match key {
+        "role" => model.role = parse_role(value),
+        "endpoint" => model.endpoint = Some(value.to_string()),
+        "model" => model.model = Some(value.to_string()),
+        "key_env" => model.key_env = Some(value.to_string()),
+        "timeout_ms" => model.timeout_ms = value.parse().ok(),
+        "max_retries" => model.max_retries = value.parse().ok(),
+        _ => {}
+    }
+}
+
+fn parse_role(value: &str) -> Option<Role> {
+    match value.trim() {
+        "small" => Some(Role::Small),
+        "large" => Some(Role::Large),
+        _ => None,
+    }
+}
+
+fn push_model_if_valid(cfg: &mut FileConfig, model: Option<FileModelConfig>) {
+    if let Some(model) = model
+        && model.role.is_some()
+    {
+        cfg.models.push(model);
+    }
 }
 
 #[cfg(test)]
@@ -230,6 +362,41 @@ mod tests {
         let cfg = basic_toml_parse("concurrency=oops\nmax_bytes=\n").unwrap_or_default();
         assert_eq!(cfg.concurrency, None);
         assert_eq!(cfg.max_bytes, None);
+    }
+
+    #[test]
+    fn parses_model_blocks() {
+        let cfg = basic_toml_parse(
+            r#"
+concurrency=2
+[[model]]
+role="small"
+endpoint="https://small.example/v1"
+model="cheap"
+key_env="SIFT_SMALL_A"
+timeout_ms=8000
+[[model]]
+role="large"
+model="frontier"
+key_env="SIFT_LARGE"
+max_retries=2
+"#,
+        )
+        .unwrap_or_default();
+        assert_eq!(cfg.concurrency, Some(2));
+        assert_eq!(cfg.models.len(), 2);
+        assert_eq!(cfg.models[0].role, Some(Role::Small));
+        assert_eq!(cfg.models[0].key_env.as_deref(), Some("SIFT_SMALL_A"));
+        assert_eq!(cfg.models[0].timeout_ms, Some(8000));
+        assert_eq!(cfg.models[1].role, Some(Role::Large));
+        assert_eq!(cfg.models[1].model.as_deref(), Some("frontier"));
+        assert_eq!(cfg.models[1].max_retries, Some(2));
+    }
+
+    #[test]
+    fn ignores_model_blocks_without_role() {
+        let cfg = basic_toml_parse("[[model]]\nmodel=\"x\"\n").unwrap_or_default();
+        assert!(cfg.models.is_empty());
     }
 
     #[test]

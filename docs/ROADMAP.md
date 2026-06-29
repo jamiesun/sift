@@ -107,7 +107,7 @@ Features: ModelClient trait, registry, role routing; per-call timeout, breaker, 
 Features: enum state machine, initial tool protocol prompt, large model emits `<TOOL_CALL>`, match-routes local skills via `$SEED`; retry≤N then partial. Bounds: compile-time skills, no dynamic load. Gate: bad JSON/unknown skill/N errors all trip; react.rs tested. Small-pool concurrency wired by P4.
 
 ### P4 Map+Reduce+report
-Features: deterministic AST coarse ledger and Markdown renderer are scaffolded; next is small-pool concurrent filter, large convergence, line-level Markdown (+optional JSON). Bounds: module mode slices root only. Gate: hits seeded risks; module/project don't bleed.
+Features: deterministic AST coarse ledger, Markdown renderer, and `[[model]]` config parsing are scaffolded; next is small-pool concurrent filter, large convergence, line-level Markdown (+optional JSON). Bounds: module mode slices root only. Gate: hits seeded risks; module/project don't bleed.
 
 ### P5 Self-audit
 Features: audit.rs scores trimmed 10 dims; `sift .` writes report to `reports/` (gitignored). Gate: `sift .` no FAIL.

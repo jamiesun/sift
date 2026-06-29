@@ -20,7 +20,7 @@ sift ./repo --api-key <KEY>     # full pipeline (or set SIFT_API_KEY)
 
 ## Status
 
-P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool protocol, compile-time skills, retry→partial) done. P4 is in progress: local AST risk ledger + Markdown renderer are wired; small-model Map pool comes next.
+P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool protocol, compile-time skills, retry→partial) done. P4 is in progress: local AST risk ledger + Markdown renderer + `[[model]]` config parsing are wired; small-model Map pool comes next.
 
 ## Docs
 

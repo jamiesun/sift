@@ -49,7 +49,7 @@ impl ReAct {
         for _ in 0..self.max_steps {
             let reply = match m.ask(&prompt) {
                 Ok(r) => r,
-                Err(_) => return Outcome::Partial(partial(&last)),
+                Err(e) => return Outcome::Partial(partial(&last, &e.label())),
             };
             if let Some(f) = extract(&reply, "FINAL") {
                 return Outcome::Final(f);
@@ -64,14 +64,14 @@ impl ReAct {
                 None => {
                     errors += 1;
                     if errors >= self.max_errors {
-                        return Outcome::Partial(partial(&last));
+                        return Outcome::Partial(partial(&last, "format_errors_exhausted"));
                     }
                     prompt =
                         "Invalid format. Return <TOOL_CALL>{json}</TOOL_CALL> or <FINAL>.".into();
                 }
             }
         }
-        Outcome::Partial(partial(&last))
+        Outcome::Partial(partial(&last, "step_cap_reached"))
     }
 }
 
@@ -101,8 +101,8 @@ fn resolve_tool_input<'a>(input: &'a str, seed: &'a str) -> &'a str {
     }
 }
 
-fn partial(last: &str) -> String {
-    format!("[TRUNCATED] {last}")
+fn partial(last: &str, reason: &str) -> String {
+    format!("[TRUNCATED: {reason}] {last}")
 }
 
 /// Extract <TAG>...</TAG> content.
@@ -143,7 +143,7 @@ mod tests {
             self.seq
                 .borrow_mut()
                 .pop()
-                .unwrap_or(Err(CallError::Exhausted))
+                .unwrap_or(Err(CallError::Network))
         }
     }
 

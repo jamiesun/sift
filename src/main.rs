@@ -72,7 +72,7 @@ fn main() -> ExitCode {
     };
 
     let rx = scanner::spawn_scan(&cfg);
-    let mut count = 0usize;
+    let mut scan = ScanStats::default();
     let mut dehydrated = 0usize;
     let mut seeded = 0usize;
     let mut seed = String::new();
@@ -81,13 +81,22 @@ fn main() -> ExitCode {
     const SEED_CAP: usize = 64 * 1024;
     let mut out = std::io::stdout().lock();
     for path in rx {
-        count += 1;
+        scan.candidate_files += 1;
         let Ok(src) = std::fs::read(&path) else {
+            scan.read_failed += 1;
             continue;
         };
-        if let Some(sum) = extract::dehydrate(&path, &src) {
-            dehydrated += 1;
-            if let Ok(j) = serde_json::to_string(&sum) {
+        if extract::Lang::from_path(&path).is_none() {
+            scan.unsupported_files += 1;
+            continue;
+        }
+        let Some(sum) = extract::dehydrate(&path, &src) else {
+            scan.parse_failed += 1;
+            continue;
+        };
+        dehydrated += 1;
+        match serde_json::to_string(&sum) {
+            Ok(j) => {
                 if reg.is_some() {
                     let record_bytes = j.len().saturating_add(1);
                     seed_candidate_bytes = seed_candidate_bytes.saturating_add(record_bytes);
@@ -106,13 +115,22 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            Err(_) => scan.serialization_failed += 1,
         }
         // ASTs are dropped inside dehydrate; the main loop keeps only capped JSONL seed.
     }
 
-    eprintln!("scan complete, candidate_files: {count}  dehydrated_files: {dehydrated}");
+    eprintln!(
+        "scan complete, candidate_files: {}  dehydrated_files: {}  read_failed: {}  unsupported_files: {}  parse_failed: {}",
+        scan.candidate_files,
+        dehydrated,
+        scan.read_failed,
+        scan.unsupported_files,
+        scan.parse_failed
+    );
 
     let coverage = InputCoverage {
+        scan,
         dehydrated,
         seeded,
         seed_bytes: seed.len(),
@@ -121,34 +139,47 @@ fn main() -> ExitCode {
         truncated: seed_truncated,
     };
 
-    let react_seed = if let Some(small_obs) = reg
+    let map_report = reg
         .as_mut()
-        .and_then(|r| r.map_small_pool(&seed, cfg.concurrency))
-    {
+        .map(|r| r.map_small_pool(&seed, cfg.concurrency));
+    let react_seed = if let Some(report) = &map_report {
         eprintln!(
-            "small-model Map complete, observation_bytes: {}",
-            small_obs.len()
+            "small-model Map complete, chunks_total: {}  succeeded: {}  failed: {}  attempts: {}  retries: {}  observation_bytes: {}",
+            report.chunks_total,
+            report.chunks_succeeded,
+            report.chunks_failed,
+            report.attempts_total,
+            report.retry_attempts,
+            report.observations.len()
         );
-        format!(
-            "{}\n\nSMALL_MODEL_OBSERVATIONS:\n{small_obs}\n\nAST_SEED:\n{seed}",
-            coverage.model_context()
-        )
+        if report.observations.is_empty() {
+            format!("{}\n\nAST_SEED:\n{seed}", coverage.model_context())
+        } else {
+            format!(
+                "{}\n\nSMALL_MODEL_OBSERVATIONS:\n{}\n\nAST_SEED:\n{seed}",
+                coverage.model_context(),
+                report.observations
+            )
+        }
     } else {
         format!("{}\n\nAST_SEED:\n{seed}", coverage.model_context())
     };
+    let diagnostics = diagnostics_section(&coverage, map_report.as_ref());
 
     // Drive ReACT only when a large model is configured.
     if let Some(large) = reg.as_mut().and_then(|r| r.large.as_mut()) {
         match react::ReAct::default().run(large, &react_seed) {
             react::Outcome::Final(rep) => println!(
-                "\n# Audit Result\n\n{}\n\n{rep}",
-                coverage.markdown_section()
+                "\n# Audit Result\n\n{}\n\n{}\n\n{rep}",
+                coverage.markdown_section(),
+                diagnostics
             ),
             react::Outcome::Partial(rep) => {
                 eprintln!("partial result due to degradation or bound: {rep}");
                 println!(
-                    "\n# Local Degraded Audit\n\n{}\n\n{}",
+                    "\n# Local Degraded Audit\n\n{}\n\n{}\n\n{}",
                     coverage.markdown_section(),
+                    diagnostics,
                     report::markdown_from_seed(&seed)
                 );
             }
@@ -157,7 +188,17 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[derive(Default)]
+struct ScanStats {
+    candidate_files: usize,
+    read_failed: usize,
+    unsupported_files: usize,
+    parse_failed: usize,
+    serialization_failed: usize,
+}
+
 struct InputCoverage {
+    scan: ScanStats,
     dehydrated: usize,
     seeded: usize,
     seed_bytes: usize,
@@ -169,7 +210,8 @@ struct InputCoverage {
 impl InputCoverage {
     fn model_context(&self) -> String {
         format!(
-            "INPUT_COVERAGE:\n- dehydrated_files: {}\n- records_sent_to_models: {}\n- seed_bytes_sent: {}\n- candidate_seed_bytes: {}\n- seed_cap_bytes: {}\n- truncated: {}",
+            "INPUT_COVERAGE:\n- candidate_files: {}\n- dehydrated_files: {}\n- records_sent_to_models: {}\n- seed_bytes_sent: {}\n- candidate_seed_bytes: {}\n- seed_cap_bytes: {}\n- truncated: {}",
+            self.scan.candidate_files,
             self.dehydrated,
             self.seeded,
             self.seed_bytes,
@@ -181,15 +223,70 @@ impl InputCoverage {
 
     fn markdown_section(&self) -> String {
         let status = if self.truncated {
-            "TRUNCATED"
+            "PARTIAL_TRUNCATED"
         } else {
             "COMPLETE"
         };
+        let scope_note = if self.truncated {
+            "\n\nResult scope: analyzed subset only; candidate model seed exceeded the cap."
+        } else {
+            ""
+        };
         format!(
-            "## Input Coverage\n\n| Status | Dehydrated Files | Model Records | Seed Bytes | Candidate Seed Bytes | Cap Bytes |\n|---|---:|---:|---:|---:|---:|\n| {status} | {} | {} | {} | {} | {} |",
-            self.dehydrated, self.seeded, self.seed_bytes, self.candidate_seed_bytes, self.seed_cap
+            "## Input Coverage\n\n| Status | Candidate Files | Dehydrated Files | Model Records | Seed Bytes | Candidate Seed Bytes | Cap Bytes |\n|---|---:|---:|---:|---:|---:|---:|\n| {status} | {} | {} | {} | {} | {} | {} |{scope_note}",
+            self.scan.candidate_files,
+            self.dehydrated,
+            self.seeded,
+            self.seed_bytes,
+            self.candidate_seed_bytes,
+            self.seed_cap
         )
     }
+}
+
+fn diagnostics_section(coverage: &InputCoverage, map: Option<&model::MapReport>) -> String {
+    let mut s = String::from("## Diagnostics\n\n");
+    s.push_str("| Area | Metric | Value |\n");
+    s.push_str("|---|---|---:|\n");
+    s.push_str(&format!(
+        "| scan | read_failed | {} |\n",
+        coverage.scan.read_failed
+    ));
+    s.push_str(&format!(
+        "| scan | unsupported_files | {} |\n",
+        coverage.scan.unsupported_files
+    ));
+    s.push_str(&format!(
+        "| scan | parse_failed | {} |\n",
+        coverage.scan.parse_failed
+    ));
+    s.push_str(&format!(
+        "| scan | serialization_failed | {} |\n",
+        coverage.scan.serialization_failed
+    ));
+    if let Some(report) = map {
+        s.push_str(&format!(
+            "| small_model_map | chunks_total | {} |\n",
+            report.chunks_total
+        ));
+        s.push_str(&format!(
+            "| small_model_map | chunks_succeeded | {} |\n",
+            report.chunks_succeeded
+        ));
+        s.push_str(&format!(
+            "| small_model_map | chunks_failed | {} |\n",
+            report.chunks_failed
+        ));
+        s.push_str(&format!(
+            "| small_model_map | attempts_total | {} |\n",
+            report.attempts_total
+        ));
+        s.push_str(&format!(
+            "| small_model_map | retry_attempts | {} |\n",
+            report.retry_attempts
+        ));
+    }
+    s
 }
 
 #[cfg(test)]

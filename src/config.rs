@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -8,6 +9,13 @@ use crate::model::{ModelClient, ModelSpec, Registry, Role, UreqTransport};
 
 const ENV_API_KEY: &str = "SIFT_API_KEY";
 const ENV_SMALL_KEY: &str = "SIFT_SMALL_KEY";
+const ENV_ENDPOINT: &str = "SIFT_ENDPOINT";
+const ENV_MODEL: &str = "SIFT_MODEL";
+const ENV_SMALL_ENDPOINT: &str = "SIFT_SMALL_ENDPOINT";
+const ENV_SMALL_MODEL: &str = "SIFT_SMALL_MODEL";
+const ENV_TIMEOUT_MS: &str = "SIFT_TIMEOUT_MS";
+const ENV_MAX_RETRIES: &str = "SIFT_MAX_RETRIES";
+const ENV_REF_SUFFIX: &str = "_ENV";
 const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_LARGE_MODEL: &str = "gpt-4o";
 const DEFAULT_SMALL_MODEL: &str = "gpt-4o-mini";
@@ -100,13 +108,12 @@ pub struct Config {
     pub max_retries: u32,
     pub self_audit: bool,
     models: Vec<FileModelConfig>,
+    env_file: BTreeMap<String, String>,
 }
 
 impl Config {
-    /// Resolve order: CLI key file > ENV > config.toml; defaults fill non-secret fields.
+    /// Resolve order: CLI key file > ENV > project .env > config.toml; defaults fill non-secret fields.
     pub fn resolve(cli: Cli) -> Result<Self> {
-        let file = load_file_config()?;
-
         let project_root = cli
             .target
             .canonicalize()
@@ -126,12 +133,14 @@ impl Config {
                 project_root.display()
             ));
         }
+        let file = load_file_config()?;
+        let env_file = load_env_file(&project_root.join(".env"))?;
 
         let api_key = cli
             .api_key_file
             .as_deref()
             .and_then(read_key_file)
-            .or_else(|| std::env::var(ENV_API_KEY).ok())
+            .or_else(|| env_key_value(&env_file, ENV_API_KEY))
             .or(file.api_key);
 
         let concurrency = cli
@@ -152,22 +161,28 @@ impl Config {
             max_bytes,
             ignores,
             scan_only: cli.scan_only,
-            endpoint: file
-                .endpoint
+            endpoint: env_value(&env_file, ENV_ENDPOINT)
+                .or(file.endpoint)
                 .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
-            model: file
-                .model
+            model: env_value(&env_file, ENV_MODEL)
+                .or(file.model)
                 .unwrap_or_else(|| DEFAULT_LARGE_MODEL.to_string()),
-            small_endpoint: file
-                .small_endpoint
+            small_endpoint: env_value(&env_file, ENV_SMALL_ENDPOINT)
+                .or(file.small_endpoint)
                 .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
-            small_model: file
-                .small_model
+            small_model: env_value(&env_file, ENV_SMALL_MODEL)
+                .or(file.small_model)
                 .unwrap_or_else(|| DEFAULT_SMALL_MODEL.to_string()),
-            timeout_ms: file.timeout_ms.unwrap_or(60_000),
-            max_retries: file.max_retries.unwrap_or(1),
+            timeout_ms: env_u64(&env_file, ENV_TIMEOUT_MS)
+                .or(file.timeout_ms)
+                .unwrap_or(60_000),
+            max_retries: env_u64(&env_file, ENV_MAX_RETRIES)
+                .and_then(|v| u32::try_from(v).ok())
+                .or(file.max_retries)
+                .unwrap_or(1),
             self_audit: cli.self_audit,
             models: file.models,
+            env_file,
         })
     }
 
@@ -190,7 +205,7 @@ impl Config {
         if large.is_none() {
             large = self.fallback_large();
         }
-        if let Ok(k) = std::env::var(ENV_SMALL_KEY) {
+        if let Some(k) = self.lookup_env(ENV_SMALL_KEY) {
             small.push(self.new_client(
                 Role::Small,
                 self.small_endpoint.clone(),
@@ -206,7 +221,7 @@ impl Config {
     fn client_from_model_config(&self, m: &FileModelConfig) -> Option<ModelClient> {
         let role = m.role?;
         let key_env = m.key_env.as_ref()?;
-        let key = std::env::var(key_env).ok()?;
+        let key = self.lookup_env(key_env)?;
         let endpoint = m
             .endpoint
             .clone()
@@ -276,10 +291,14 @@ impl Config {
             Role::Large => self.model.clone(),
         }
     }
+
+    fn lookup_env(&self, key: &str) -> Option<String> {
+        env_key_value(&self.env_file, key)
+    }
 }
 
 pub fn missing_large_key_hint() -> &'static str {
-    "missing large-model API key. Provide one of:\n  export SIFT_API_KEY=<KEY>\n  sift ./repo --api-key-file ~/.config/sift/key\n  ~/.config/sift/config.toml:\n    api_key = \"<KEY>\"\n  ~/.config/sift/config.toml:\n    [[model]]\n    role = \"large\"\n    key_env = \"SIFT_API_KEY\"\nOr use --scan-only for scan/dehydrate only, or --self-audit for local gates."
+    "missing large-model API key. Provide one of:\n  export SIFT_API_KEY=<KEY>\n  .env:\n    SIFT_API_KEY_ENV=WJT_AZURE_OPENAI_API_KEY\n  sift ./repo --api-key-file ~/.config/sift/key\n  ~/.config/sift/config.toml:\n    api_key = \"<KEY>\"\n  ~/.config/sift/config.toml:\n    [[model]]\n    role = \"large\"\n    key_env = \"SIFT_API_KEY\"\nOr use --scan-only for scan/dehydrate only, or --self-audit for local gates."
 }
 
 fn default_concurrency() -> usize {
@@ -302,6 +321,95 @@ fn load_file_config() -> Result<FileConfig> {
         Err(e) => return Err(anyhow!("cannot read config file {}: {e}", path.display())),
     };
     parse_file_config(&src).with_context(|| format!("invalid config file {}", path.display()))
+}
+
+fn load_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
+    let src = match std::fs::read_to_string(path) {
+        Ok(src) => src,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(anyhow!("cannot read env file {}: {e}", path.display())),
+    };
+    parse_env_file(&src).with_context(|| format!("invalid env file {}", path.display()))
+}
+
+fn parse_env_file(src: &str) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (idx, raw) in src.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(anyhow!("line {} is missing '='", idx + 1));
+        };
+        let key = key.trim();
+        if !valid_env_key(key) {
+            return Err(anyhow!("line {} has invalid key", idx + 1));
+        }
+        out.insert(key.to_string(), parse_env_value(value.trim())?);
+    }
+    Ok(out)
+}
+
+fn valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn parse_env_value(value: &str) -> Result<String> {
+    if let Some(stripped) = value.strip_prefix('"') {
+        let Some(end) = stripped.rfind('"') else {
+            return Err(anyhow!("unterminated double-quoted env value"));
+        };
+        return Ok(stripped[..end].to_string());
+    }
+    if let Some(stripped) = value.strip_prefix('\'') {
+        let Some(end) = stripped.rfind('\'') else {
+            return Err(anyhow!("unterminated single-quoted env value"));
+        };
+        return Ok(stripped[..end].to_string());
+    }
+    Ok(value
+        .split_once(" #")
+        .map(|(v, _)| v)
+        .unwrap_or(value)
+        .trim()
+        .to_string())
+}
+
+fn env_value(env_file: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .or_else(|| env_file.get(key).cloned())
+}
+
+fn env_key_value(env_file: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .or_else(|| {
+            let ref_key = format!("{key}{ENV_REF_SUFFIX}");
+            env_file
+                .get(&ref_key)
+                .and_then(|source_key| std::env::var(source_key).ok())
+        })
+        .or_else(|| {
+            if key == ENV_API_KEY {
+                None
+            } else {
+                env_file.get(key).cloned()
+            }
+        })
+}
+
+fn env_u64(env_file: &BTreeMap<String, String>, key: &str) -> Option<u64> {
+    env_value(env_file, key).and_then(|v| v.parse().ok())
 }
 
 fn read_key_file(path: &Path) -> Option<String> {
@@ -542,6 +650,7 @@ max_retries = 1
             max_retries: 0,
             self_audit: false,
             models: Vec::new(),
+            env_file: BTreeMap::new(),
         });
         assert_eq!(cfg.root, module.canonicalize().unwrap_or(module));
         std::fs::remove_dir_all(root).ok();
@@ -553,5 +662,38 @@ max_retries = 1
             std::process::id(),
             std::thread::current().id()
         ))
+    }
+
+    #[test]
+    fn parses_project_env_file() {
+        let env = parse_env_file(
+            r#"
+# local
+SIFT_API_KEY=large
+SIFT_API_KEY_ENV=WJT_AZURE_OPENAI_API_KEY
+export SIFT_SMALL_KEY='small'
+SIFT_ENDPOINT="https://example.test/v1/chat/completions"
+SIFT_MAX_RETRIES=2 # retry once after first attempt
+"#,
+        )
+        .unwrap_or_default();
+
+        assert_eq!(env.get("SIFT_API_KEY").map(String::as_str), Some("large"));
+        assert_eq!(
+            env.get("SIFT_API_KEY_ENV").map(String::as_str),
+            Some("WJT_AZURE_OPENAI_API_KEY")
+        );
+        assert_eq!(env.get("SIFT_SMALL_KEY").map(String::as_str), Some("small"));
+        assert_eq!(
+            env.get("SIFT_ENDPOINT").map(String::as_str),
+            Some("https://example.test/v1/chat/completions")
+        );
+        assert_eq!(env_u64(&env, "SIFT_MAX_RETRIES"), Some(2));
+    }
+
+    #[test]
+    fn rejects_dirty_env_lines() {
+        assert!(parse_env_file("bad line\n").is_err());
+        assert!(parse_env_file("1BAD=x\n").is_err());
     }
 }

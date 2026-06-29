@@ -17,6 +17,8 @@ sift ./repo --scan-only        # scan layer only (no key needed)
 sift ./repo --module src        # audit a submodule
 SIFT_API_KEY=<KEY> sift ./repo  # full pipeline
 sift ./repo --api-key-file ~/.sift/key
+sift ./repo --report-language zh # request a Simplified Chinese Markdown report
+sift ./repo --debug              # print extra diagnostics to stderr
 sift doctor                    # check config, key_env, and endpoint/key mismatches
 sift ./repo --self-audit        # local P5 gate, no model key needed
 ```
@@ -24,6 +26,10 @@ sift ./repo --self-audit        # local P5 gate, no model key needed
 On first run, sift creates `~/.sift/config.toml` from the built-in default
 template. The default file contains only non-secret settings; put model keys in
 environment variables or pass `--api-key-file`.
+
+Full audits keep stdout reserved for the final Markdown report. Progress,
+status, and debug diagnostics are printed to stderr so long runs do not look
+stalled and downstream tools can still pipe stdout safely.
 
 ## Supported Languages
 

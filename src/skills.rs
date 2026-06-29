@@ -1,3 +1,4 @@
+use crate::config::ReportLanguage;
 use crate::report;
 
 /// Compile-time local skill set callable from the ReACT loop.
@@ -20,11 +21,16 @@ impl Skill {
     }
 
     /// Run locally without network access.
+    #[cfg(test)]
     pub fn run(self, input: &str) -> String {
+        self.run_with_language(input, ReportLanguage::En)
+    }
+
+    pub fn run_with_language(self, input: &str, language: ReportLanguage) -> String {
         match self {
             Skill::CoarseFilter => report::findings_json_from_seed(input),
-            Skill::Converge => report::markdown_from_findings_json(input)
-                .unwrap_or_else(|| report::markdown_from_seed(input)),
+            Skill::Converge => report::markdown_from_findings_json_with_language(input, language)
+                .unwrap_or_else(|| report::markdown_from_seed_with_language(input, language)),
         }
     }
 }

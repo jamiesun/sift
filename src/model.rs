@@ -130,6 +130,18 @@ impl ModelClient {
         self.spec.role
     }
 
+    pub fn debug_summary(&self) -> String {
+        format!(
+            "role={:?} endpoint={} model={} timeout_ms={} max_retries={} key_present={}",
+            self.spec.role,
+            self.spec.endpoint,
+            self.spec.model,
+            self.spec.timeout.as_millis(),
+            self.spec.max_retries,
+            !self.spec.key.is_empty()
+        )
+    }
+
     /// Send one completion request with bounded retry. Tripped breakers fail fast.
     pub fn complete(&mut self, prompt: &str) -> Result<String, CallError> {
         if self.breaker.tripped() {
@@ -211,6 +223,18 @@ impl Registry {
     /// Missing large model means callers must degrade to AST-only output.
     pub fn degraded(&self) -> bool {
         self.large.is_none()
+    }
+
+    pub fn debug_summaries(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        match &self.large {
+            Some(large) => out.push(format!("large {}", large.debug_summary())),
+            None => out.push("large missing".to_string()),
+        }
+        for (idx, small) in self.small.iter().enumerate() {
+            out.push(format!("small[{idx}] {}", small.debug_summary()));
+        }
+        out
     }
 
     /// Run bounded Map waves over AST seed chunks. Failed chunks get one chunk-level retry.

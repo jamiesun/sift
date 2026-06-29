@@ -17,11 +17,15 @@ sift ./repo --scan-only        # 仅扫描层
 sift ./repo --module src        # 审子模块
 SIFT_API_KEY=<KEY> sift ./repo  # 全链路
 sift ./repo --api-key-file ~/.sift/key
+sift ./repo --report-language zh # 输出中文 Markdown 报告
+sift ./repo --debug              # 向 stderr 打印更多诊断
 sift doctor                    # 检查配置、key_env 与 endpoint/key 错配
 sift ./repo --self-audit        # 本地 P5 门禁，无需模型 Key
 ```
 
 首次运行时，sift 会自动创建 `~/.sift/config.toml` 默认配置文件。默认配置只包含非密钥项；模型密钥放在环境变量里，或通过 `--api-key-file` 传入。
+
+完整审计的 stdout 只保留最终 Markdown 报告；进度、状态和 debug 诊断都走 stderr，长任务不会看起来像卡死，也不影响下游工具安全消费 stdout。
 
 ## 支持语言
 

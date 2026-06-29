@@ -125,7 +125,7 @@ fn run_checks(project_root: &Path) -> Vec<Check> {
         &mut checks,
         "UX",
         !contains_han(&src_text),
-        "Program source uses English-only comments and runtime text",
+        "Program source avoids raw CJK literals",
         "searched src for CJK Unified Ideographs",
     );
     push(

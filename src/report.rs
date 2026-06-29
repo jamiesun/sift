@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ReportLanguage;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -11,7 +13,14 @@ pub enum Severity {
 }
 
 impl Severity {
-    fn label(self) -> &'static str {
+    fn label_for(self, language: ReportLanguage) -> &'static str {
+        if language == ReportLanguage::Zh {
+            return match self {
+                Severity::High => "\u{9ad8}",
+                Severity::Medium => "\u{4e2d}",
+                Severity::Low => "\u{4f4e}",
+            };
+        }
         match self {
             Severity::High => "HIGH",
             Severity::Medium => "MEDIUM",
@@ -53,13 +62,16 @@ pub fn findings_json_from_seed(seed: &str) -> String {
     serde_json::to_string_pretty(&findings).unwrap_or_else(|_| "[]".to_string())
 }
 
-pub fn markdown_from_seed(seed: &str) -> String {
-    render_markdown(&findings_from_seed(seed))
+pub fn markdown_from_seed_with_language(seed: &str, language: ReportLanguage) -> String {
+    render_markdown_with_language(&findings_from_seed(seed), language)
 }
 
-pub fn markdown_from_findings_json(input: &str) -> Option<String> {
+pub fn markdown_from_findings_json_with_language(
+    input: &str,
+    language: ReportLanguage,
+) -> Option<String> {
     let findings: Vec<RiskFinding> = serde_json::from_str(input).ok()?;
-    Some(render_markdown(&findings))
+    Some(render_markdown_with_language(&findings, language))
 }
 
 pub fn findings_from_seed(seed: &str) -> Vec<RiskFinding> {
@@ -139,14 +151,25 @@ pub fn findings_from_seed(seed: &str) -> Vec<RiskFinding> {
     out
 }
 
-pub fn render_markdown(findings: &[RiskFinding]) -> String {
-    let mut s = String::from("# Risk Ledger\n\n");
+pub fn render_markdown_with_language(findings: &[RiskFinding], language: ReportLanguage) -> String {
+    let mut s = match language {
+        ReportLanguage::En => String::from("# Risk Ledger\n\n"),
+        ReportLanguage::Zh => String::from("# \u{98ce}\u{9669}\u{8d26}\u{672c}\n\n"),
+    };
     if findings.is_empty() {
-        s.push_str("No deterministic risks found in the analyzed input. Review coverage, runtime behavior, configuration, and cross-module semantics manually.\n");
+        s.push_str(match language {
+            ReportLanguage::En => "No deterministic risks found in the analyzed input. Review coverage, runtime behavior, configuration, and cross-module semantics manually.\n",
+            ReportLanguage::Zh => "\u{672a}\u{5728}\u{5206}\u{6790}\u{8f93}\u{5165}\u{4e2d}\u{53d1}\u{73b0}\u{786e}\u{5b9a}\u{6027}\u{98ce}\u{9669}\u{3002}\u{8bf7}\u{4eba}\u{5de5}\u{590d}\u{6838}\u{8986}\u{76d6}\u{7387}\u{3001}\u{8fd0}\u{884c}\u{65f6}\u{884c}\u{4e3a}\u{3001}\u{914d}\u{7f6e}\u{548c}\u{8de8}\u{6a21}\u{5757}\u{8bed}\u{4e49}\u{3002}\n",
+        });
         return s;
     }
 
-    s.push_str("| Severity | Location | Rule | Finding |\n");
+    s.push_str(match language {
+        ReportLanguage::En => "| Severity | Location | Rule | Finding |\n",
+        ReportLanguage::Zh => {
+            "|\u{4e25}\u{91cd}\u{6027}|\u{4f4d}\u{7f6e}|\u{89c4}\u{5219}|\u{53d1}\u{73b0}|\n"
+        }
+    });
     s.push_str("|---|---|---|---|\n");
     for f in findings {
         let location = match f.line {
@@ -155,14 +178,36 @@ pub fn render_markdown(findings: &[RiskFinding]) -> String {
         };
         s.push_str(&format!(
             "| {} | `{}` | `{}` | {}: `{}` |\n",
-            f.severity.label(),
+            f.severity.label_for(language),
             escape_cell(&location),
             escape_cell(&f.rule),
-            escape_cell(&f.title),
+            escape_cell(title_for_language(&f.title, language)),
             escape_cell(&f.evidence),
         ));
     }
     s
+}
+
+fn title_for_language(title: &str, language: ReportLanguage) -> &str {
+    if language != ReportLanguage::Zh {
+        return title;
+    }
+    match title {
+        "Unchecked unwrap/expect can panic" => {
+            "\u{672a}\u{68c0}\u{67e5}\u{7684} unwrap/expect \u{53ef}\u{80fd} panic"
+        }
+        "Explicit panic path" => "\u{663e}\u{5f0f} panic \u{8def}\u{5f84}",
+        "Subprocess boundary requires timeout and input control" => {
+            "\u{5b50}\u{8fdb}\u{7a0b}\u{8fb9}\u{754c}\u{9700}\u{8981}\u{8d85}\u{65f6}\u{548c}\u{8f93}\u{5165}\u{63a7}\u{5236}"
+        }
+        "Unsafe surface requires manual audit" => {
+            "unsafe \u{8868}\u{9762}\u{9700}\u{8981}\u{4eba}\u{5de5}\u{5ba1}\u{8ba1}"
+        }
+        "Cross-boundary reference left as black box" => {
+            "\u{8de8}\u{8fb9}\u{754c}\u{5f15}\u{7528}\u{4ecd}\u{662f}\u{9ed1}\u{76d2}"
+        }
+        _ => title,
+    }
 }
 
 fn push_call_risk(
@@ -259,7 +304,7 @@ mod tests {
 
     #[test]
     fn renders_empty_report() {
-        let md = render_markdown(&[]);
+        let md = render_markdown_with_language(&[], ReportLanguage::En);
         assert!(md.contains("No deterministic risks found"));
     }
 
@@ -267,7 +312,17 @@ mod tests {
     fn findings_json_round_trips_to_markdown() {
         let seed = r#"{"path":"src/a.rs","external":["[EXTERNAL_BLACKBOX] use crate::x;"]}"#;
         let json = findings_json_from_seed(seed);
-        let md = markdown_from_findings_json(&json).unwrap_or_default();
+        let md = markdown_from_findings_json_with_language(&json, ReportLanguage::En)
+            .unwrap_or_default();
         assert!(md.contains("external-blackbox"));
+    }
+
+    #[test]
+    fn renders_localized_markdown() {
+        let seed =
+            r#"{"path":"src/a.rs","locations":[{"kind":"call","line":2,"text":"x.unwrap"}]}"#;
+        let md = markdown_from_seed_with_language(seed, ReportLanguage::Zh);
+        assert!(md.contains("\u{98ce}\u{9669}\u{8d26}\u{672c}"));
+        assert!(md.contains("\u{4e25}\u{91cd}\u{6027}"));
     }
 }

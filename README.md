@@ -15,12 +15,14 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for full design.
 ```sh
 sift ./repo --scan-only        # scan layer only (no key needed)
 sift ./repo --module src        # audit a submodule
-sift ./repo --api-key <KEY>     # full pipeline (or set SIFT_API_KEY)
+SIFT_API_KEY=<KEY> sift ./repo  # full pipeline
+sift ./repo --api-key-file ~/.config/sift/key
+sift ./repo --self-audit        # local P5 gate, no model key needed
 ```
 
 ## Status
 
-P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool protocol, compile-time skills, retry→partial) done. P4 is in progress: local AST risk ledger, Markdown renderer, `[[model]]` config parsing, and small-model Map waves are wired; seeded report gates come next.
+P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool protocol, compile-time skills, retry→partial) done. P4 is in progress: local AST risk ledger, Markdown renderer, `[[model]]` config parsing, and small-model Map waves are wired. A minimal P5 local self-audit now writes `reports/self-audit.md`; seeded report gates and stronger scoring come next.
 
 ## Docs
 

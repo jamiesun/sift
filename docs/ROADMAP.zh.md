@@ -14,7 +14,7 @@
 - 架构图
 
 ```text
-  CLI 参数 / ENV / config.toml ──(降级寻址, 缺 Key 即退)
+  CLI key file / ENV / config.toml ──(降级寻址, 缺 Key 即退)
         ▼
   扫描层  ignore::Walk → 有界 channel(消费即丢)         [P0 ✓]
         ▼
@@ -81,7 +81,7 @@ role = "large"
 endpoint = "..."; key_env = "SIFT_API_KEY"
 timeout_ms = 60000; max_retries = 1
 ```
-寻址降级：CLI > ENV > toml > 默认；无 large key 即退。小模型缺失可降级为纯 AST 兜底。
+寻址降级：CLI key file > ENV > toml > 默认；无 large key 即退。小模型缺失可降级为纯 AST 兜底。
 
 ## 超时熔断与恢复（绝不死磕）
 
@@ -120,8 +120,8 @@ timeout_ms = 60000; max_retries = 1
 - 门禁：审已知样本命中预埋风险；模块/项目模式不串。
 
 ### P5 自审计
-- 功能：audit.rs 跑裁剪版 10 维评分(DF/CQ/RB/SEC/CC/BT/MEM 等)，`sift .` 自审报表入 `reports/`(gitignore)。
-- 门禁：`sift .` 自审无 FAIL。
+- 功能：audit.rs 跑裁剪版 10 维评分(DF/CQ/RB/SEC/CC/BT/MEM 等)，`sift . --self-audit` 自审报表入 `reports/`(gitignore)。
+- 门禁：本地自审无 FAIL。
 
 ### P6 发布加固
 - 功能：ReleaseSmall 单二进制、多语法扩展、JSON 输出稳定。
@@ -134,6 +134,6 @@ timeout_ms = 60000; max_retries = 1
 - 报表定位行号、含跨模块依赖与并发/资源风险，可直接拍板。
 - 任一外部调用必超时；连错熔断出半成品而非死磕。
 - 同一二进制审项目与 `--module` 子目录不串。
-- `sift .` 自审无 FAIL。
+- `sift . --self-audit` 自审无 FAIL。
 
 > 建议非铁律：rayon/具体超时阈值/体积耗时数字按基准定，别当验收红线锁死。已确立铁律：单二进制、降级寻址、有界通道、硬超时熔断、无 unwrap、TDD、自审计达标。

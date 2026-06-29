@@ -25,7 +25,7 @@ impl Lang {
     }
 }
 
-/// 脱水后的扁平骨架：只留拓扑，丢注释与函数体。
+/// Flat dehydrated structure: topology only, no comments or function bodies.
 #[derive(Debug, Default, Serialize)]
 pub struct AstSummary {
     pub path: String,
@@ -33,9 +33,9 @@ pub struct AstSummary {
     pub imports: Vec<String>,
     pub signatures: Vec<String>,
     pub calls: Vec<String>,
-    /// 带行号的结构索引，供 P4 风险账本定位。
+    /// Line-aware structure index for the P4 risk ledger.
     pub locations: Vec<AstLocation>,
-    /// 跳出当前目录树的引用，交大模型脑补。
+    /// References crossing the current audit boundary.
     pub external: Vec<String>,
 }
 
@@ -46,7 +46,7 @@ pub struct AstLocation {
     pub text: String,
 }
 
-/// 解析失败/坏节点返回 None 或残缺骨架，绝不 panic；解析完即 drop AST。
+/// Parse failures return None or partial summaries; ASTs are dropped after extraction.
 pub fn dehydrate(path: &Path, src: &[u8]) -> Option<AstSummary> {
     let lang = Lang::from_path(path)?;
     let mut parser = Parser::new();

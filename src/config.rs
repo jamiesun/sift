@@ -1,12 +1,21 @@
+use std::collections::BTreeMap;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 
 use crate::model::{ModelClient, ModelSpec, Registry, Role, UreqTransport};
 
 const ENV_API_KEY: &str = "SIFT_API_KEY";
 const ENV_SMALL_KEY: &str = "SIFT_SMALL_KEY";
+const ENV_ENDPOINT: &str = "SIFT_ENDPOINT";
+const ENV_MODEL: &str = "SIFT_MODEL";
+const ENV_SMALL_ENDPOINT: &str = "SIFT_SMALL_ENDPOINT";
+const ENV_SMALL_MODEL: &str = "SIFT_SMALL_MODEL";
+const ENV_TIMEOUT_MS: &str = "SIFT_TIMEOUT_MS";
+const ENV_MAX_RETRIES: &str = "SIFT_MAX_RETRIES";
+const ENV_REF_SUFFIX: &str = "_ENV";
 const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_LARGE_MODEL: &str = "gpt-4o";
 const DEFAULT_SMALL_MODEL: &str = "gpt-4o-mini";
@@ -20,39 +29,39 @@ const DEFAULT_IGNORES: &[&str] = &[
     "__pycache__",
 ];
 
-/// sift — 可控成本的开源项目审计器。
+/// sift: a cost-controlled open-source project auditor.
 #[derive(Parser, Debug)]
 #[command(
     name = "sift",
     version,
-    about = "分级漏斗审计：AST 脱水 → 小模型粗筛 → 大模型收敛"
+    about = "Tiered audit: AST dehydration -> small-model Map -> large-model Reduce"
 )]
 pub struct Cli {
-    /// 要审计的项目根目录
+    /// Project root to audit
     #[arg(default_value = ".")]
     pub target: PathBuf,
 
-    /// 仅审计项目内子模块路径，扫描根重置到此
+    /// Audit only this submodule path inside the project root
     #[arg(long)]
     pub module: Option<PathBuf>,
 
-    /// 从文件读取前沿模型 API Key（降级链最高优先级）
+    /// Read the large-model API key from a file
     #[arg(long)]
     pub api_key_file: Option<PathBuf>,
 
-    /// 并发解析线程数
+    /// Parser concurrency
     #[arg(long)]
     pub concurrency: Option<usize>,
 
-    /// 单文件字节上限，超过即跳过
+    /// Per-file byte limit; larger files are skipped
     #[arg(long)]
     pub max_bytes: Option<u64>,
 
-    /// 只跑扫描层，不连模型（无需 Key）
+    /// Run only scan/dehydrate and do not call models
     #[arg(long)]
     pub scan_only: bool,
 
-    /// 运行本地自审计并将报告写入 reports/
+    /// Run local self-audit and write reports/self-audit.md
     #[arg(long)]
     pub self_audit: bool,
 }
@@ -99,17 +108,16 @@ pub struct Config {
     pub max_retries: u32,
     pub self_audit: bool,
     models: Vec<FileModelConfig>,
+    env_file: BTreeMap<String, String>,
 }
 
 impl Config {
-    /// 降级寻址：CLI key file > ENV > config.toml；默认值兜底。
+    /// Resolve order: CLI key file > ENV > project .env > config.toml; defaults fill non-secret fields.
     pub fn resolve(cli: Cli) -> Result<Self> {
-        let file = load_file_config();
-
         let project_root = cli
             .target
             .canonicalize()
-            .map_err(|e| anyhow!("无法定位项目根 {}: {e}", cli.target.display()))?;
+            .map_err(|e| anyhow!("cannot locate project root {}: {e}", cli.target.display()))?;
         let root_candidate = match &cli.module {
             Some(m) if m.is_absolute() => m.clone(),
             Some(m) => project_root.join(m),
@@ -117,20 +125,22 @@ impl Config {
         };
         let root = root_candidate
             .canonicalize()
-            .map_err(|e| anyhow!("无法定位审计根 {}: {e}", root_candidate.display()))?;
+            .map_err(|e| anyhow!("cannot locate audit root {}: {e}", root_candidate.display()))?;
         if cli.module.is_some() && !root.starts_with(&project_root) {
             return Err(anyhow!(
-                "模块路径 {} 不在项目根 {} 内",
+                "module path {} is outside project root {}",
                 root.display(),
                 project_root.display()
             ));
         }
+        let file = load_file_config()?;
+        let env_file = load_env_file(&project_root.join(".env"))?;
 
         let api_key = cli
             .api_key_file
             .as_deref()
             .and_then(read_key_file)
-            .or_else(|| std::env::var(ENV_API_KEY).ok())
+            .or_else(|| env_key_value(&env_file, ENV_API_KEY))
             .or(file.api_key);
 
         let concurrency = cli
@@ -151,27 +161,32 @@ impl Config {
             max_bytes,
             ignores,
             scan_only: cli.scan_only,
-            endpoint: file
-                .endpoint
+            endpoint: env_value(&env_file, ENV_ENDPOINT)
+                .or(file.endpoint)
                 .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
-            model: file
-                .model
+            model: env_value(&env_file, ENV_MODEL)
+                .or(file.model)
                 .unwrap_or_else(|| DEFAULT_LARGE_MODEL.to_string()),
-            small_endpoint: file
-                .small_endpoint
+            small_endpoint: env_value(&env_file, ENV_SMALL_ENDPOINT)
+                .or(file.small_endpoint)
                 .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
-            small_model: file
-                .small_model
+            small_model: env_value(&env_file, ENV_SMALL_MODEL)
+                .or(file.small_model)
                 .unwrap_or_else(|| DEFAULT_SMALL_MODEL.to_string()),
-            timeout_ms: file.timeout_ms.unwrap_or(60_000),
-            max_retries: file.max_retries.unwrap_or(1),
+            timeout_ms: env_u64(&env_file, ENV_TIMEOUT_MS)
+                .or(file.timeout_ms)
+                .unwrap_or(60_000),
+            max_retries: env_u64(&env_file, ENV_MAX_RETRIES)
+                .and_then(|v| u32::try_from(v).ok())
+                .or(file.max_retries)
+                .unwrap_or(1),
             self_audit: cli.self_audit,
             models: file.models,
+            env_file,
         })
     }
 
-    /// 据降级寻址结果装配多模型注册表：[[model]] 优先，保留旧式 large/api_key + SIFT_SMALL_KEY 兜底。
-    /// 缺 large 即降级（degraded=true），上层回退 AST-only，绝不阻断。
+    /// Build the model registry from [[model]] blocks first, then legacy fallbacks.
     pub fn build_registry(&self) -> Registry {
         let mut small = Vec::new();
         let mut large = None;
@@ -190,7 +205,7 @@ impl Config {
         if large.is_none() {
             large = self.fallback_large();
         }
-        if let Ok(k) = std::env::var(ENV_SMALL_KEY) {
+        if let Some(k) = self.lookup_env(ENV_SMALL_KEY) {
             small.push(self.new_client(
                 Role::Small,
                 self.small_endpoint.clone(),
@@ -206,7 +221,7 @@ impl Config {
     fn client_from_model_config(&self, m: &FileModelConfig) -> Option<ModelClient> {
         let role = m.role?;
         let key_env = m.key_env.as_ref()?;
-        let key = std::env::var(key_env).ok()?;
+        let key = self.lookup_env(key_env)?;
         let endpoint = m
             .endpoint
             .clone()
@@ -276,10 +291,14 @@ impl Config {
             Role::Large => self.model.clone(),
         }
     }
+
+    fn lookup_env(&self, key: &str) -> Option<String> {
+        env_key_value(&self.env_file, key)
+    }
 }
 
 pub fn missing_large_key_hint() -> &'static str {
-    "未找到 large 模型 API Key。注入方式（任一）：\n  export SIFT_API_KEY=<KEY>\n  sift ./repo --api-key-file ~/.config/sift/key\n  ~/.config/sift/config.toml:\n    api_key=\"<KEY>\"\n  ~/.config/sift/config.toml:\n    [[model]]\n    role=\"large\"\n    key_env=\"SIFT_API_KEY\"\n或加 --scan-only 仅跑扫描层，或加 --self-audit 运行本地自审计。"
+    "missing large-model API key. Provide one of:\n  export SIFT_API_KEY=<KEY>\n  .env:\n    SIFT_API_KEY_ENV=WJT_AZURE_OPENAI_API_KEY\n  sift ./repo --api-key-file ~/.config/sift/key\n  ~/.config/sift/config.toml:\n    api_key = \"<KEY>\"\n  ~/.config/sift/config.toml:\n    [[model]]\n    role = \"large\"\n    key_env = \"SIFT_API_KEY\"\nOr use --scan-only for scan/dehydrate only, or --self-audit for local gates."
 }
 
 fn default_concurrency() -> usize {
@@ -292,11 +311,105 @@ fn config_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/sift/config.toml"))
 }
 
-fn load_file_config() -> FileConfig {
-    config_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| basic_toml_parse(&s))
-        .unwrap_or_default()
+fn load_file_config() -> Result<FileConfig> {
+    let Some(path) = config_path() else {
+        return Ok(FileConfig::default());
+    };
+    let src = match std::fs::read_to_string(&path) {
+        Ok(src) => src,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(FileConfig::default()),
+        Err(e) => return Err(anyhow!("cannot read config file {}: {e}", path.display())),
+    };
+    parse_file_config(&src).with_context(|| format!("invalid config file {}", path.display()))
+}
+
+fn load_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
+    let src = match std::fs::read_to_string(path) {
+        Ok(src) => src,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(e) => return Err(anyhow!("cannot read env file {}: {e}", path.display())),
+    };
+    parse_env_file(&src).with_context(|| format!("invalid env file {}", path.display()))
+}
+
+fn parse_env_file(src: &str) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (idx, raw) in src.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(anyhow!("line {} is missing '='", idx + 1));
+        };
+        let key = key.trim();
+        if !valid_env_key(key) {
+            return Err(anyhow!("line {} has invalid key", idx + 1));
+        }
+        out.insert(key.to_string(), parse_env_value(value.trim())?);
+    }
+    Ok(out)
+}
+
+fn valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn parse_env_value(value: &str) -> Result<String> {
+    if let Some(stripped) = value.strip_prefix('"') {
+        let Some(end) = stripped.rfind('"') else {
+            return Err(anyhow!("unterminated double-quoted env value"));
+        };
+        return Ok(stripped[..end].to_string());
+    }
+    if let Some(stripped) = value.strip_prefix('\'') {
+        let Some(end) = stripped.rfind('\'') else {
+            return Err(anyhow!("unterminated single-quoted env value"));
+        };
+        return Ok(stripped[..end].to_string());
+    }
+    Ok(value
+        .split_once(" #")
+        .map(|(v, _)| v)
+        .unwrap_or(value)
+        .trim()
+        .to_string())
+}
+
+fn env_value(env_file: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .or_else(|| env_file.get(key).cloned())
+}
+
+fn env_key_value(env_file: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .or_else(|| {
+            let ref_key = format!("{key}{ENV_REF_SUFFIX}");
+            env_file
+                .get(&ref_key)
+                .and_then(|source_key| std::env::var(source_key).ok())
+        })
+        .or_else(|| {
+            if key == ENV_API_KEY {
+                None
+            } else {
+                env_file.get(key).cloned()
+            }
+        })
+}
+
+fn env_u64(env_file: &BTreeMap<String, String>, key: &str) -> Option<u64> {
+    env_value(env_file, key).and_then(|v| v.parse().ok())
 }
 
 fn read_key_file(path: &Path) -> Option<String> {
@@ -309,58 +422,70 @@ fn read_key_file(path: &Path) -> Option<String> {
     }
 }
 
-/// 极简 key=value + [[model]] 解析，避免引入完整 toml 依赖；解析失败静默回退默认。
-fn basic_toml_parse(src: &str) -> Option<FileConfig> {
-    let mut cfg = FileConfig::default();
-    let mut current_model: Option<FileModelConfig> = None;
-    for line in src.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line == "[[model]]" {
-            push_model_if_valid(&mut cfg, current_model.take());
-            current_model = Some(FileModelConfig::default());
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        let v = v.trim().trim_matches('"');
-        if let Some(model) = current_model.as_mut() {
-            parse_model_key(model, k.trim(), v);
-        } else {
-            parse_root_key(&mut cfg, k.trim(), v);
+fn parse_file_config(src: &str) -> Result<FileConfig> {
+    let parsed: toml::Value = toml::from_str(src).context("parse TOML")?;
+    let table = parsed
+        .as_table()
+        .ok_or_else(|| anyhow!("config root must be a TOML table"))?;
+    let mut cfg = FileConfig {
+        api_key: table_string(table, "api_key"),
+        concurrency: table_u64(table, "concurrency").and_then(|v| usize::try_from(v).ok()),
+        max_bytes: table_u64(table, "max_bytes"),
+        ignores: table_string_array(table, "ignores"),
+        endpoint: table_string(table, "endpoint"),
+        model: table_string(table, "model"),
+        small_endpoint: table_string(table, "small_endpoint"),
+        small_model: table_string(table, "small_model"),
+        timeout_ms: table_u64(table, "timeout_ms"),
+        max_retries: table_u64(table, "max_retries").and_then(|v| u32::try_from(v).ok()),
+        models: Vec::new(),
+    };
+
+    if let Some(models) = table.get("model").and_then(|v| v.as_array()) {
+        for item in models {
+            let Some(t) = item.as_table() else {
+                continue;
+            };
+            let model = FileModelConfig {
+                role: table_string(t, "role").and_then(|r| parse_role(&r)),
+                endpoint: table_string(t, "endpoint"),
+                model: table_string(t, "model"),
+                key_env: table_string(t, "key_env"),
+                timeout_ms: table_u64(t, "timeout_ms"),
+                max_retries: table_u64(t, "max_retries").and_then(|v| u32::try_from(v).ok()),
+            };
+            if model.role.is_some() {
+                cfg.models.push(model);
+            }
         }
     }
-    push_model_if_valid(&mut cfg, current_model);
-    Some(cfg)
+
+    Ok(cfg)
 }
 
-fn parse_root_key(cfg: &mut FileConfig, key: &str, value: &str) {
-    match key {
-        "api_key" => cfg.api_key = Some(value.to_string()),
-        "concurrency" => cfg.concurrency = value.parse().ok(),
-        "max_bytes" => cfg.max_bytes = value.parse().ok(),
-        "endpoint" => cfg.endpoint = Some(value.to_string()),
-        "model" => cfg.model = Some(value.to_string()),
-        "small_endpoint" => cfg.small_endpoint = Some(value.to_string()),
-        "small_model" => cfg.small_model = Some(value.to_string()),
-        "timeout_ms" => cfg.timeout_ms = value.parse().ok(),
-        "max_retries" => cfg.max_retries = value.parse().ok(),
-        _ => {}
+fn table_string(table: &toml::Table, key: &str) -> Option<String> {
+    table.get(key)?.as_str().map(str::to_string)
+}
+
+fn table_u64(table: &toml::Table, key: &str) -> Option<u64> {
+    let value = table.get(key)?;
+    if let Some(i) = value.as_integer() {
+        u64::try_from(i).ok()
+    } else {
+        None
     }
 }
 
-fn parse_model_key(model: &mut FileModelConfig, key: &str, value: &str) {
-    match key {
-        "role" => model.role = parse_role(value),
-        "endpoint" => model.endpoint = Some(value.to_string()),
-        "model" => model.model = Some(value.to_string()),
-        "key_env" => model.key_env = Some(value.to_string()),
-        "timeout_ms" => model.timeout_ms = value.parse().ok(),
-        "max_retries" => model.max_retries = value.parse().ok(),
-        _ => {}
+fn table_string_array(table: &toml::Table, key: &str) -> Option<Vec<String>> {
+    let values = table.get(key)?.as_array()?;
+    let out: Vec<String> = values
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    if out.len() == values.len() {
+        Some(out)
+    } else {
+        None
     }
 }
 
@@ -372,36 +497,26 @@ fn parse_role(value: &str) -> Option<Role> {
     }
 }
 
-fn push_model_if_valid(cfg: &mut FileConfig, model: Option<FileModelConfig>) {
-    if let Some(model) = model
-        && model.role.is_some()
-    {
-        cfg.models.push(model);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parses_basic_keys_and_skips_comments() {
-        let cfg =
-            basic_toml_parse("# c\napi_key=\"k\"\nconcurrency=8\nbad line\n").unwrap_or_default();
+        let cfg = parse_file_config("# c\napi_key=\"k\"\nconcurrency=8\n").unwrap_or_default();
         assert_eq!(cfg.api_key.as_deref(), Some("k"));
         assert_eq!(cfg.concurrency, Some(8));
     }
 
     #[test]
-    fn dirty_values_fall_back_to_none_not_panic() {
-        let cfg = basic_toml_parse("concurrency=oops\nmax_bytes=\n").unwrap_or_default();
-        assert_eq!(cfg.concurrency, None);
-        assert_eq!(cfg.max_bytes, None);
+    fn dirty_values_reject_config_not_silent_default() {
+        let err = parse_file_config("concurrency=oops\nmax_bytes=\n");
+        assert!(err.is_err());
     }
 
     #[test]
     fn parses_model_blocks() {
-        let cfg = basic_toml_parse(
+        let cfg = parse_file_config(
             r#"
 concurrency=2
 [[model]]
@@ -430,7 +545,7 @@ max_retries=2
 
     #[test]
     fn ignores_model_blocks_without_role() {
-        let cfg = basic_toml_parse("[[model]]\nmodel=\"x\"\n").unwrap_or_default();
+        let cfg = parse_file_config("[[model]]\nmodel=\"x\"\n").unwrap_or_default();
         assert!(cfg.models.is_empty());
     }
 
@@ -442,15 +557,47 @@ max_retries=2
     #[test]
     fn missing_key_hint_uses_parseable_model_block() {
         let hint = missing_large_key_hint();
-        assert!(hint.contains("[[model]]\n    role=\"large\""));
+        assert!(hint.contains("[[model]]\n    role = \"large\""));
         let snippet = r#"
 [[model]]
-role="large"
-key_env="SIFT_API_KEY"
+role = "large"
+key_env = "SIFT_API_KEY"
 "#;
-        let cfg = basic_toml_parse(snippet).unwrap_or_default();
+        let cfg = parse_file_config(snippet).unwrap_or_default();
         assert_eq!(cfg.models.len(), 1);
         assert_eq!(cfg.models[0].role, Some(Role::Large));
+    }
+
+    #[test]
+    fn parses_documented_model_config() {
+        let cfg = parse_file_config(
+            r#"
+concurrency = 8
+[[model]]
+role = "small"
+endpoint = "https://small.example/v1"
+key_env = "SIFT_SMALL_KEY"
+timeout_ms = 8000
+max_retries = 1
+[[model]]
+role = "large"
+endpoint = "https://large.example/v1"
+key_env = "SIFT_API_KEY"
+timeout_ms = 60000
+max_retries = 1
+"#,
+        )
+        .unwrap_or_default();
+
+        assert_eq!(cfg.concurrency, Some(8));
+        assert_eq!(cfg.models.len(), 2);
+        assert_eq!(
+            cfg.models[0].endpoint.as_deref(),
+            Some("https://small.example/v1")
+        );
+        assert_eq!(cfg.models[0].key_env.as_deref(), Some("SIFT_SMALL_KEY"));
+        assert_eq!(cfg.models[0].max_retries, Some(1));
+        assert_eq!(cfg.models[1].key_env.as_deref(), Some("SIFT_API_KEY"));
     }
 
     #[test]
@@ -469,7 +616,7 @@ key_env="SIFT_API_KEY"
             self_audit: false,
         };
         let err = Config::resolve(cli).err().map(|e| e.to_string());
-        assert!(err.unwrap_or_default().contains("不在项目根"));
+        assert!(err.unwrap_or_default().contains("outside project root"));
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -503,6 +650,7 @@ key_env="SIFT_API_KEY"
             max_retries: 0,
             self_audit: false,
             models: Vec::new(),
+            env_file: BTreeMap::new(),
         });
         assert_eq!(cfg.root, module.canonicalize().unwrap_or(module));
         std::fs::remove_dir_all(root).ok();
@@ -514,5 +662,38 @@ key_env="SIFT_API_KEY"
             std::process::id(),
             std::thread::current().id()
         ))
+    }
+
+    #[test]
+    fn parses_project_env_file() {
+        let env = parse_env_file(
+            r#"
+# local
+SIFT_API_KEY=large
+SIFT_API_KEY_ENV=WJT_AZURE_OPENAI_API_KEY
+export SIFT_SMALL_KEY='small'
+SIFT_ENDPOINT="https://example.test/v1/chat/completions"
+SIFT_MAX_RETRIES=2 # retry once after first attempt
+"#,
+        )
+        .unwrap_or_default();
+
+        assert_eq!(env.get("SIFT_API_KEY").map(String::as_str), Some("large"));
+        assert_eq!(
+            env.get("SIFT_API_KEY_ENV").map(String::as_str),
+            Some("WJT_AZURE_OPENAI_API_KEY")
+        );
+        assert_eq!(env.get("SIFT_SMALL_KEY").map(String::as_str), Some("small"));
+        assert_eq!(
+            env.get("SIFT_ENDPOINT").map(String::as_str),
+            Some("https://example.test/v1/chat/completions")
+        );
+        assert_eq!(env_u64(&env, "SIFT_MAX_RETRIES"), Some(2));
+    }
+
+    #[test]
+    fn rejects_dirty_env_lines() {
+        assert!(parse_env_file("bad line\n").is_err());
+        assert!(parse_env_file("1BAD=x\n").is_err());
     }
 }

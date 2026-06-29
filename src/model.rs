@@ -1,18 +1,17 @@
-// P2 暴露的客户端 API（complete/熔断/路由）由 P3 ReACT 驱动消费；
-// 阶段交付期允许未调用，单测已覆盖超时/坏响应/跳闸。
-#![allow(dead_code)]
-
 use std::fmt;
 use std::time::Duration;
 
-/// 模型角色：small=粗筛池（Map 并发）/ large=收敛（Reduce 一次）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::Deserialize;
+
+/// Model role: small runs Map filtering, large runs Reduce convergence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     Small,
     Large,
 }
 
-/// 一个模型端点的规格。key 仅从 env/文件解析，绝不入日志。
+/// Model endpoint specification. Keys are resolved from env/files and never logged.
 pub struct ModelSpec {
     pub role: Role,
     pub endpoint: String,
@@ -22,7 +21,7 @@ pub struct ModelSpec {
     pub max_retries: u32,
 }
 
-/// 自定义 Debug：脱敏 key，杜绝密钥进日志/报告。
+/// Custom Debug redacts secrets so keys cannot leak into logs or reports.
 impl fmt::Debug for ModelSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ModelSpec")
@@ -36,7 +35,7 @@ impl fmt::Debug for ModelSpec {
     }
 }
 
-/// 传输层错误：区分可重试瞬态与不可重试。
+/// Transport failures are classified for retry decisions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
     Timeout,
@@ -46,13 +45,13 @@ pub enum TransportError {
 }
 
 impl TransportError {
-    /// 仅瞬态错误退避重试；坏响应/状态码无意义重试。
+    /// Retry only transient failures; bad bodies and status codes are terminal.
     fn transient(&self) -> bool {
         matches!(self, TransportError::Timeout | TransportError::Network)
     }
 }
 
-/// 网络抽象：单测注入假实现，无需联网即可验证超时/坏响应/熔断。
+/// Network abstraction for deterministic timeout/body/breaker tests.
 pub trait Transport: Send + Sync {
     fn post(
         &self,
@@ -63,7 +62,7 @@ pub trait Transport: Send + Sync {
     ) -> Result<String, TransportError>;
 }
 
-/// 熔断计数：连续失败 ≥ 阈值即跳闸，停止 I/O，不空转。
+/// Consecutive-failure breaker. Once tripped, callers stop I/O instead of spinning.
 #[derive(Debug)]
 struct Breaker {
     consecutive: u32,
@@ -91,10 +90,25 @@ impl Breaker {
 #[derive(Debug, PartialEq, Eq)]
 pub enum CallError {
     Tripped,
-    Exhausted,
+    Timeout,
+    Status(u16),
+    Network,
+    BadBody,
 }
 
-/// 单个模型客户端：硬超时 + 退避重试 + 熔断。失败永不挂起。
+impl CallError {
+    pub fn label(&self) -> String {
+        match self {
+            CallError::Tripped => "breaker_tripped".to_string(),
+            CallError::Timeout => "timeout".to_string(),
+            CallError::Status(code) => format!("http_status_{code}"),
+            CallError::Network => "network".to_string(),
+            CallError::BadBody => "bad_body".to_string(),
+        }
+    }
+}
+
+/// Single model client with hard timeout, bounded retry, backoff, and breaker.
 pub struct ModelClient {
     spec: ModelSpec,
     transport: Box<dyn Transport>,
@@ -116,7 +130,7 @@ impl ModelClient {
         self.spec.role
     }
 
-    /// 发一次完成请求：含 ≤max_retries 退避重试；跳闸即拒，绝不空转。
+    /// Send one completion request with bounded retry. Tripped breakers fail fast.
     pub fn complete(&mut self, prompt: &str) -> Result<String, CallError> {
         if self.breaker.tripped() {
             return Err(CallError::Tripped);
@@ -124,7 +138,7 @@ impl ModelClient {
         let body = build_chat_body(&self.spec.model, prompt);
         let mut attempt = 0u32;
         loop {
-            match self.transport.post(
+            let current_error = match self.transport.post(
                 &self.spec.endpoint,
                 &self.spec.key,
                 &body,
@@ -135,20 +149,26 @@ impl ModelClient {
                         self.breaker.ok();
                         return Ok(c);
                     }
-                    None => self.breaker.fail(),
+                    None => {
+                        self.breaker.fail();
+                        CallError::BadBody
+                    }
                 },
                 Err(e) => {
+                    let transient = e.transient();
+                    let current_error = call_error_from_transport(&e);
                     self.breaker.fail();
-                    if !e.transient() {
-                        return Err(CallError::Exhausted);
+                    if !transient {
+                        return Err(current_error);
                     }
+                    current_error
                 }
-            }
+            };
             if attempt >= self.spec.max_retries || self.breaker.tripped() {
                 return Err(if self.breaker.tripped() {
                     CallError::Tripped
                 } else {
-                    CallError::Exhausted
+                    current_error
                 });
             }
             backoff(self.backoff_base, attempt);
@@ -157,56 +177,113 @@ impl ModelClient {
     }
 }
 
-/// 注册表：small 池并发粗筛、large 单点收敛；按角色路由。
+fn call_error_from_transport(e: &TransportError) -> CallError {
+    match e {
+        TransportError::Timeout => CallError::Timeout,
+        TransportError::Status(code) => CallError::Status(*code),
+        TransportError::Network => CallError::Network,
+        TransportError::BadBody => CallError::BadBody,
+    }
+}
+
+/// Registry routes small Map calls and the single large Reduce call by role.
 #[derive(Default)]
 pub struct Registry {
     pub small: Vec<ModelClient>,
     pub large: Option<ModelClient>,
 }
 
+#[derive(Debug, Default)]
+pub struct MapReport {
+    pub observations: String,
+    pub chunks_total: usize,
+    pub chunks_succeeded: usize,
+    pub chunks_failed: usize,
+    pub attempts_total: usize,
+    pub retry_attempts: usize,
+}
+
 impl Registry {
     pub fn has_large(&self) -> bool {
         self.large.is_some()
     }
-    /// 缺 large(收敛模型)即降级——上层据此回退 AST-only，不阻断。
+    /// Missing large model means callers must degrade to AST-only output.
     pub fn degraded(&self) -> bool {
         self.large.is_none()
     }
 
-    /// 用 small 模型池对 AST seed 做分批 Map 粗筛；失败的分片直接降级丢弃。
-    pub fn map_small_pool(&mut self, seed: &str, max_parallel: usize) -> Option<String> {
+    /// Run bounded Map waves over AST seed chunks. Failed chunks get one chunk-level retry.
+    pub fn map_small_pool(&mut self, seed: &str, max_parallel: usize) -> MapReport {
+        let chunks = seed_chunks(seed, 16 * 1024);
+        let chunks_total = chunks.len();
         if self.small.is_empty() || seed.trim().is_empty() {
-            return None;
+            return MapReport {
+                chunks_total,
+                chunks_failed: chunks_total,
+                ..Default::default()
+            };
         }
 
-        let chunks = seed_chunks(seed, 16 * 1024);
         let wave_size = max_parallel.max(1).min(self.small.len());
-        let mut out = Vec::new();
-        let mut offset = 0usize;
-        while offset < chunks.len() {
-            let end = (offset + wave_size).min(chunks.len());
-            let wave = &chunks[offset..end];
-            let results = std::thread::scope(|scope| {
-                let mut handles = Vec::new();
-                for (client, chunk) in self.small.iter_mut().zip(wave.iter()) {
-                    handles.push(scope.spawn(move || client.complete(&small_prompt(chunk))));
-                }
-                let mut results = Vec::new();
-                for handle in handles {
-                    if let Ok(Ok(text)) = handle.join() {
-                        results.push(text);
+        let mut pending: Vec<(usize, String)> = chunks.into_iter().enumerate().collect();
+        let mut out: Vec<(usize, String)> = Vec::new();
+        let mut attempts_total = 0usize;
+        let mut retry_attempts = 0usize;
+
+        for pass in 0..=1 {
+            if pending.is_empty() {
+                break;
+            }
+
+            let mut next_pending = Vec::new();
+            let mut offset = 0usize;
+            while offset < pending.len() {
+                let end = (offset + wave_size).min(pending.len());
+                let wave = &pending[offset..end];
+                let results = std::thread::scope(|scope| {
+                    let mut handles = Vec::new();
+                    for (client, (idx, chunk)) in self.small.iter_mut().zip(wave.iter()) {
+                        handles.push(
+                            scope.spawn(move || (*idx, client.complete(&small_prompt(chunk)))),
+                        );
+                    }
+                    let mut results = Vec::new();
+                    for handle in handles {
+                        results.push(handle.join());
+                    }
+                    results
+                });
+
+                for (item, result) in wave.iter().zip(results) {
+                    attempts_total = attempts_total.saturating_add(1);
+                    if pass > 0 {
+                        retry_attempts = retry_attempts.saturating_add(1);
+                    }
+                    match result {
+                        Ok((idx, Ok(text))) => out.push((idx, text)),
+                        _ if pass == 0 => next_pending.push(item.clone()),
+                        _ => {}
                     }
                 }
-                results
-            });
-            out.extend(results);
-            offset = end;
+
+                offset = end;
+            }
+
+            pending = next_pending;
         }
 
-        if out.is_empty() {
-            None
-        } else {
-            Some(out.join("\n---\n"))
+        out.sort_by_key(|(idx, _)| *idx);
+        MapReport {
+            observations: out
+                .into_iter()
+                .map(|(_, text)| text)
+                .collect::<Vec<_>>()
+                .join("\n---\n"),
+            chunks_total,
+            chunks_succeeded: chunks_total.saturating_sub(pending.len()),
+            chunks_failed: pending.len(),
+            attempts_total,
+            retry_attempts,
         }
     }
 }
@@ -249,14 +326,14 @@ fn build_chat_body(model: &str, prompt: &str) -> String {
     .to_string()
 }
 
-/// 解析 OpenAI 风格响应；任何缺字段/坏 JSON 返回 None 计入熔断。
+/// Parse OpenAI-style responses; missing fields or bad JSON count as failures.
 fn parse_content(raw: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let c = v.get("choices")?.get(0)?.get("message")?.get("content")?;
     c.as_str().map(str::to_string)
 }
 
-/// ureq 阻塞实现：硬超时，绝不无限等待。
+/// Blocking ureq transport with a mandatory timeout.
 pub struct UreqTransport;
 
 impl Transport for UreqTransport {
@@ -348,7 +425,7 @@ mod tests {
             Box::new(Fake::new(vec![Err(TransportError::Status(401))])),
             3,
         );
-        assert_eq!(c.complete("p"), Err(CallError::Exhausted));
+        assert_eq!(c.complete("p"), Err(CallError::Status(401)));
     }
 
     #[test]
@@ -378,7 +455,29 @@ mod tests {
             ],
             large: None,
         };
-        let obs = reg.map_small_pool("line1\nline2\n", 2).unwrap_or_default();
-        assert!(obs.contains("hi"));
+        let report = reg.map_small_pool("line1\nline2\n", 2);
+        assert!(report.observations.contains("hi"));
+        assert_eq!(report.chunks_failed, 0);
+    }
+
+    #[test]
+    fn small_pool_retries_failed_chunks_once() {
+        let mut reg = Registry {
+            small: vec![ModelClient::new(
+                spec(),
+                Box::new(Fake::new(vec![
+                    Ok(ok_body()),
+                    Err(TransportError::Status(500)),
+                ])),
+                3,
+            )],
+            large: None,
+        };
+        let report = reg.map_small_pool("line1\n", 1);
+        assert!(report.observations.contains("hi"));
+        assert_eq!(report.chunks_total, 1);
+        assert_eq!(report.chunks_succeeded, 1);
+        assert_eq!(report.chunks_failed, 0);
+        assert_eq!(report.retry_attempts, 1);
     }
 }

@@ -198,12 +198,10 @@ impl Config {
         let file = load_file_config()?;
         let env_file = load_env_file(&project_root.join(".env"))?;
 
-        let api_key = cli
-            .api_key_file
-            .as_deref()
-            .and_then(read_key_file)
-            .or_else(|| env_key_value(&env_file, ENV_API_KEY))
-            .or(file.api_key);
+        let api_key = match cli.api_key_file.as_deref() {
+            Some(path) => Some(read_key_file(path)?),
+            None => env_key_value(&env_file, ENV_API_KEY).or(file.api_key),
+        };
 
         let concurrency = cli
             .concurrency
@@ -720,7 +718,7 @@ fn load_file_config() -> Result<FileConfig> {
         }
         Err(e) => return Err(anyhow!("cannot read config file {}: {e}", path.display())),
     };
-    parse_file_config(&src).with_context(|| format!("invalid config file {}", path.display()))
+    parse_file_config(&src).map_err(|e| anyhow!("invalid config file {}: {e}", path.display()))
 }
 
 fn create_default_config(path: &Path) -> Result<()> {
@@ -833,13 +831,14 @@ fn env_u64(env_file: &BTreeMap<String, String>, key: &str) -> Option<u64> {
     env_value(env_file, key).and_then(|v| v.parse().ok())
 }
 
-fn read_key_file(path: &Path) -> Option<String> {
-    let key = std::fs::read_to_string(path).ok()?;
+fn read_key_file(path: &Path) -> Result<String> {
+    let key = std::fs::read_to_string(path)
+        .map_err(|e| anyhow!("cannot read api key file {}: {e}", path.display()))?;
     let key = key.trim();
     if key.is_empty() {
-        None
+        Err(anyhow!("api key file {} is empty", path.display()))
     } else {
-        Some(key.to_string())
+        Ok(key.to_string())
     }
 }
 
@@ -849,31 +848,38 @@ fn parse_file_config(src: &str) -> Result<FileConfig> {
         .as_table()
         .ok_or_else(|| anyhow!("config root must be a TOML table"))?;
     let mut cfg = FileConfig {
-        api_key: table_string(table, "api_key"),
-        concurrency: table_u64(table, "concurrency").and_then(|v| usize::try_from(v).ok()),
-        max_bytes: table_u64(table, "max_bytes"),
-        ignores: table_string_array(table, "ignores"),
-        endpoint: table_string(table, "endpoint"),
-        model: table_string(table, "model"),
-        small_endpoint: table_string(table, "small_endpoint"),
-        small_model: table_string(table, "small_model"),
-        timeout_ms: table_u64(table, "timeout_ms"),
-        max_retries: table_u64(table, "max_retries").and_then(|v| u32::try_from(v).ok()),
+        api_key: optional_string(table, "api_key")?,
+        concurrency: optional_usize(table, "concurrency")?,
+        max_bytes: optional_u64(table, "max_bytes")?,
+        ignores: optional_string_array(table, "ignores")?,
+        endpoint: optional_string(table, "endpoint")?,
+        model: optional_legacy_model_string(table)?,
+        small_endpoint: optional_string(table, "small_endpoint")?,
+        small_model: optional_string(table, "small_model")?,
+        timeout_ms: optional_u64(table, "timeout_ms")?,
+        max_retries: optional_u32(table, "max_retries")?,
         models: Vec::new(),
     };
 
     if let Some(models) = table.get("model").and_then(|v| v.as_array()) {
         for item in models {
-            let Some(t) = item.as_table() else {
-                continue;
+            let t = item
+                .as_table()
+                .ok_or_else(|| anyhow!("model entries must be TOML tables"))?;
+            let role = match optional_string(t, "role")? {
+                Some(role) => Some(
+                    parse_role(&role)
+                        .ok_or_else(|| anyhow!("model.role must be small or large, got {role}"))?,
+                ),
+                None => None,
             };
             let model = FileModelConfig {
-                role: table_string(t, "role").and_then(|r| parse_role(&r)),
-                endpoint: table_string(t, "endpoint"),
-                model: table_string(t, "model"),
-                key_env: table_string(t, "key_env"),
-                timeout_ms: table_u64(t, "timeout_ms"),
-                max_retries: table_u64(t, "max_retries").and_then(|v| u32::try_from(v).ok()),
+                role,
+                endpoint: optional_string(t, "endpoint")?,
+                model: optional_string(t, "model")?,
+                key_env: optional_string(t, "key_env")?,
+                timeout_ms: optional_u64(t, "timeout_ms")?,
+                max_retries: optional_u32(t, "max_retries")?,
             };
             if model.role.is_some() {
                 cfg.models.push(model);
@@ -884,30 +890,74 @@ fn parse_file_config(src: &str) -> Result<FileConfig> {
     Ok(cfg)
 }
 
-fn table_string(table: &toml::Table, key: &str) -> Option<String> {
-    table.get(key)?.as_str().map(str::to_string)
+fn optional_legacy_model_string(table: &toml::Table) -> Result<Option<String>> {
+    let Some(value) = table.get("model") else {
+        return Ok(None);
+    };
+    if value.is_array() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .map(|s| Some(s.to_string()))
+        .ok_or_else(|| anyhow!("config key model must be a string or [[model]] table array"))
 }
 
-fn table_u64(table: &toml::Table, key: &str) -> Option<u64> {
-    let value = table.get(key)?;
-    if let Some(i) = value.as_integer() {
-        u64::try_from(i).ok()
-    } else {
-        None
+fn optional_string(table: &toml::Table, key: &str) -> Result<Option<String>> {
+    let Some(value) = table.get(key) else {
+        return Ok(None);
+    };
+    value
+        .as_str()
+        .map(|s| Some(s.to_string()))
+        .ok_or_else(|| anyhow!("config key {key} must be a string"))
+}
+
+fn optional_u64(table: &toml::Table, key: &str) -> Result<Option<u64>> {
+    let Some(value) = table.get(key) else {
+        return Ok(None);
+    };
+    match value.as_integer() {
+        Some(i) => u64::try_from(i)
+            .map(Some)
+            .map_err(|_| anyhow!("config key {key} must be a non-negative integer")),
+        None => Err(anyhow!("config key {key} must be an integer")),
     }
 }
 
-fn table_string_array(table: &toml::Table, key: &str) -> Option<Vec<String>> {
-    let values = table.get(key)?.as_array()?;
-    let out: Vec<String> = values
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-    if out.len() == values.len() {
-        Some(out)
-    } else {
-        None
+fn optional_usize(table: &toml::Table, key: &str) -> Result<Option<usize>> {
+    optional_u64(table, key).and_then(|value| match value {
+        Some(v) => usize::try_from(v)
+            .map(Some)
+            .map_err(|_| anyhow!("config key {key} is too large")),
+        None => Ok(None),
+    })
+}
+
+fn optional_u32(table: &toml::Table, key: &str) -> Result<Option<u32>> {
+    optional_u64(table, key).and_then(|value| match value {
+        Some(v) => u32::try_from(v)
+            .map(Some)
+            .map_err(|_| anyhow!("config key {key} is too large")),
+        None => Ok(None),
+    })
+}
+
+fn optional_string_array(table: &toml::Table, key: &str) -> Result<Option<Vec<String>>> {
+    let Some(value) = table.get(key) else {
+        return Ok(None);
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| anyhow!("config key {key} must be an array of strings"))?;
+    let mut out = Vec::new();
+    for item in values {
+        let Some(s) = item.as_str() else {
+            return Err(anyhow!("config key {key} must be an array of strings"));
+        };
+        out.push(s.to_string());
     }
+    Ok(Some(out))
 }
 
 fn parse_role(value: &str) -> Option<Role> {
@@ -932,6 +982,16 @@ mod tests {
     #[test]
     fn dirty_values_reject_config_not_silent_default() {
         let err = parse_file_config("concurrency=oops\nmax_bytes=\n");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn valid_toml_wrong_types_reject_config_not_silent_default() {
+        let err = parse_file_config("concurrency=\"oops\"\nmax_bytes=\"huge\"\n");
+        assert!(err.is_err());
+        let err = parse_file_config("ignores=[\"target\", 1]\n");
+        assert!(err.is_err());
+        let err = parse_file_config("model=42\n");
         assert!(err.is_err());
     }
 
@@ -996,6 +1056,33 @@ max_retries=2
     fn ignores_model_blocks_without_role() {
         let cfg = parse_file_config("[[model]]\nmodel=\"x\"\n").unwrap_or_default();
         assert!(cfg.models.is_empty());
+    }
+
+    #[test]
+    fn rejects_unknown_model_role() {
+        let err = parse_file_config("[[model]]\nrole=\"medium\"\nmodel=\"x\"\n");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_types_inside_model_blocks() {
+        let err = parse_file_config("[[model]]\nrole=\"small\"\ntimeout_ms=\"fast\"\n");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn explicit_api_key_file_must_be_readable_and_non_empty() {
+        let root = unique_test_dir("key-file");
+        std::fs::create_dir_all(&root).ok();
+        let missing = root.join("missing-key");
+        let err = read_key_file(&missing).err().map(|e| e.to_string());
+        assert!(err.unwrap_or_default().contains("cannot read api key file"));
+
+        let empty = root.join("empty-key");
+        std::fs::write(&empty, " \n").ok();
+        let err = read_key_file(&empty).err().map(|e| e.to_string());
+        assert!(err.unwrap_or_default().contains("is empty"));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

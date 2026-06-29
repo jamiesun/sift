@@ -47,3 +47,45 @@ pub fn spawn_scan(cfg: &Config) -> Receiver<PathBuf> {
 
     rx
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Cli, Config};
+
+    #[test]
+    fn scan_skips_ignored_dirs_and_large_files() {
+        let root = unique_test_dir("scan");
+        let ignored = root.join("target");
+        assert!(std::fs::create_dir_all(&ignored).is_ok());
+        assert!(std::fs::write(root.join("a.rs"), "fn a() {}").is_ok());
+        assert!(std::fs::write(ignored.join("b.rs"), "fn b() {}").is_ok());
+        let cli = Cli {
+            target: root.clone(),
+            module: None,
+            api_key_file: None,
+            concurrency: None,
+            max_bytes: Some(128),
+            scan_only: true,
+            self_audit: false,
+        };
+        let cfg = Config::resolve(cli);
+        assert!(cfg.is_ok(), "test config should resolve");
+        let Ok(cfg) = cfg else {
+            std::fs::remove_dir_all(root).ok();
+            return;
+        };
+        let paths: Vec<PathBuf> = spawn_scan(&cfg).iter().collect();
+        assert!(paths.iter().any(|p| p.ends_with("a.rs")));
+        assert!(!paths.iter().any(|p| p.ends_with("b.rs")));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sift-scanner-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+}

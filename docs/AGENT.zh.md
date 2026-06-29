@@ -15,7 +15,7 @@
 3. **单二进制、低依赖。** 无向量库、无 embedding/RAG、无数据库、无缓存；纯文本管道，阅后即焚。
 4. **技能仅编译期写死。** 技能 = enum + match 本地函数；无动态加载、无运行时插件。
 5. **流式、内存与规模脱钩。** 有界通道，脱水后即 drop AST，常驻内存压低位。
-6. **密钥降级寻址。** CLI > ENV > config.toml > 默认；缺大模型 Key 立退给提示，绝不挂起或交互追问。
+6. **密钥降级寻址。** CLI key file > ENV > config.toml > 默认；缺大模型 Key 立退给提示，绝不挂起或交互追问。
 7. **密钥仅 env/文件。** 不编译进、不提交、不打印、不入日志。
 8. **模块审计不膨胀成全局。** 跨界引用打 `[EXTERNAL_BLACKBOX]`，不追链。
 9. **TDD。** 每个 `src/*.rs` 自带单测；新子系统单测同建。
@@ -44,7 +44,7 @@ cargo build                    # 必须绿
 cargo test                     # 必须过
 cargo fmt && cargo clippy      # 提交前清
 rg 'unwrap\(|expect\(|panic!' src  # 必须为 0
-sift .                         # 自审(P5+)须无 FAIL
+sift . --self-audit            # 本地自审(P5+)须无 FAIL
 ```
 
 - 一次提交一个关注点；带 `Co-authored-by: Copilot` trailer。

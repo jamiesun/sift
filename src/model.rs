@@ -286,26 +286,24 @@ impl Transport for UreqTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     struct Fake {
-        seq: RefCell<Vec<Result<String, TransportError>>>,
+        seq: Mutex<Vec<Result<String, TransportError>>>,
     }
     impl Fake {
         fn new(seq: Vec<Result<String, TransportError>>) -> Self {
             Self {
-                seq: RefCell::new(seq),
+                seq: Mutex::new(seq),
             }
         }
     }
-    unsafe impl Send for Fake {}
-    unsafe impl Sync for Fake {}
     impl Transport for Fake {
         fn post(&self, _: &str, _: &str, _: &str, _: Duration) -> Result<String, TransportError> {
-            self.seq
-                .borrow_mut()
-                .pop()
-                .unwrap_or(Err(TransportError::Network))
+            let Ok(mut seq) = self.seq.lock() else {
+                return Err(TransportError::Network);
+            };
+            seq.pop().unwrap_or(Err(TransportError::Network))
         }
     }
 

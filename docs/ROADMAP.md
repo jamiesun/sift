@@ -14,7 +14,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 - Architecture
 
 ```text
-  CLI args / ENV / config.toml ──(fallback resolve, exit if no key)
+  CLI key file / ENV / config.toml ──(fallback resolve, exit if no key)
         ▼
   Scan      ignore::Walk → bounded channel (consume & drop)        [P0 ✓]
         ▼
@@ -81,7 +81,7 @@ role = "large"
 endpoint = "..."; key_env = "SIFT_API_KEY"
 timeout_ms = 60000; max_retries = 1
 ```
-Resolve order: CLI > ENV > toml > default; no large key ⇒ exit. Missing small model degrades to AST-only fallback.
+Resolve order: CLI key file > ENV > toml > default; no large key ⇒ exit. Missing small model degrades to AST-only fallback.
 
 ## Timeout, breaker & recovery (never grind)
 
@@ -110,7 +110,7 @@ Features: enum state machine, initial tool protocol prompt, large model emits `<
 Features: deterministic AST coarse ledger, Markdown renderer, `[[model]]` config parsing, and small-pool Map waves are scaffolded; next is seeded-risk report gates and stronger large convergence. Bounds: module mode slices root only. Gate: hits seeded risks; module/project don't bleed.
 
 ### P5 Self-audit
-Features: audit.rs scores trimmed 10 dims; `sift .` writes report to `reports/` (gitignored). Gate: `sift .` no FAIL.
+Features: audit.rs scores trimmed 10 dims; `sift . --self-audit` writes report to `reports/` (gitignored). Gate: self-audit no FAIL.
 
 ### P6 Release hardening
 Features: ReleaseSmall single binary, more grammars, stable JSON. Gate: single-file dist, self-audit PASS, docs↔code consistent.
@@ -122,6 +122,6 @@ Features: ReleaseSmall single binary, more grammars, stable JSON. Gate: single-f
 - Report cites line numbers + cross-module deps + concurrency/resource risk.
 - Every external call times out; failures trip to partial, never grind.
 - One binary audits project and `--module` without bleed.
-- `sift .` self-audit no FAIL.
+- `sift . --self-audit` self-audit no FAIL.
 
 > Suggestions (not rules): rayon, exact timeout/size/latency numbers per benchmark. Hard rules: single binary, fallback resolve, bounded channel, hard-timeout breaker, no unwrap, TDD, bilingual docs (EN default, ZH twin), passing self-audit.

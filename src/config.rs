@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
@@ -32,13 +32,13 @@ pub struct Cli {
     #[arg(default_value = ".")]
     pub target: PathBuf,
 
-    /// 仅审计子模块路径（项目内相对/绝对皆可），扫描根重置到此
+    /// 仅审计项目内子模块路径，扫描根重置到此
     #[arg(long)]
     pub module: Option<PathBuf>,
 
-    /// 前沿模型 API Key（降级链最高优先级）
+    /// 从文件读取前沿模型 API Key（降级链最高优先级）
     #[arg(long)]
-    pub api_key: Option<String>,
+    pub api_key_file: Option<PathBuf>,
 
     /// 并发解析线程数
     #[arg(long)]
@@ -51,6 +51,10 @@ pub struct Cli {
     /// 只跑扫描层，不连模型（无需 Key）
     #[arg(long)]
     pub scan_only: bool,
+
+    /// 运行本地自审计并将报告写入 reports/
+    #[arg(long)]
+    pub self_audit: bool,
 }
 
 #[derive(Debug, Default)]
@@ -80,6 +84,7 @@ struct FileModelConfig {
 
 #[derive(Debug)]
 pub struct Config {
+    pub project_root: PathBuf,
     pub root: PathBuf,
     pub api_key: Option<String>,
     pub concurrency: usize,
@@ -92,25 +97,39 @@ pub struct Config {
     pub small_model: String,
     pub timeout_ms: u64,
     pub max_retries: u32,
+    pub self_audit: bool,
     models: Vec<FileModelConfig>,
 }
 
 impl Config {
-    /// 降级寻址：CLI > ENV > config.toml；默认值兜底。
+    /// 降级寻址：CLI key file > ENV > config.toml；默认值兜底。
     pub fn resolve(cli: Cli) -> Result<Self> {
         let file = load_file_config();
 
-        let root = match &cli.module {
+        let project_root = cli
+            .target
+            .canonicalize()
+            .map_err(|e| anyhow!("无法定位项目根 {}: {e}", cli.target.display()))?;
+        let root_candidate = match &cli.module {
             Some(m) if m.is_absolute() => m.clone(),
-            Some(m) => cli.target.join(m),
+            Some(m) => project_root.join(m),
             None => cli.target.clone(),
         };
-        let root = root
+        let root = root_candidate
             .canonicalize()
-            .map_err(|e| anyhow!("无法定位审计根 {}: {e}", root.display()))?;
+            .map_err(|e| anyhow!("无法定位审计根 {}: {e}", root_candidate.display()))?;
+        if cli.module.is_some() && !root.starts_with(&project_root) {
+            return Err(anyhow!(
+                "模块路径 {} 不在项目根 {} 内",
+                root.display(),
+                project_root.display()
+            ));
+        }
 
         let api_key = cli
-            .api_key
+            .api_key_file
+            .as_deref()
+            .and_then(read_key_file)
             .or_else(|| std::env::var(ENV_API_KEY).ok())
             .or(file.api_key);
 
@@ -125,6 +144,7 @@ impl Config {
             .unwrap_or_else(|| DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect());
 
         Ok(Self {
+            project_root,
             root,
             api_key,
             concurrency,
@@ -145,6 +165,7 @@ impl Config {
                 .unwrap_or_else(|| DEFAULT_SMALL_MODEL.to_string()),
             timeout_ms: file.timeout_ms.unwrap_or(60_000),
             max_retries: file.max_retries.unwrap_or(1),
+            self_audit: cli.self_audit,
             models: file.models,
         })
     }
@@ -257,6 +278,10 @@ impl Config {
     }
 }
 
+pub fn missing_large_key_hint() -> &'static str {
+    "未找到 large 模型 API Key。注入方式（任一）：\n  export SIFT_API_KEY=<KEY>\n  sift ./repo --api-key-file ~/.config/sift/key\n  ~/.config/sift/config.toml:\n    api_key=\"<KEY>\"\n  ~/.config/sift/config.toml:\n    [[model]]\n    role=\"large\"\n    key_env=\"SIFT_API_KEY\"\n或加 --scan-only 仅跑扫描层，或加 --self-audit 运行本地自审计。"
+}
+
 fn default_concurrency() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -272,6 +297,16 @@ fn load_file_config() -> FileConfig {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| basic_toml_parse(&s))
         .unwrap_or_default()
+}
+
+fn read_key_file(path: &Path) -> Option<String> {
+    let key = std::fs::read_to_string(path).ok()?;
+    let key = key.trim();
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
 }
 
 /// 极简 key=value + [[model]] 解析，避免引入完整 toml 依赖；解析失败静默回退默认。
@@ -402,5 +437,82 @@ max_retries=2
     #[test]
     fn concurrency_never_zero() {
         assert!(default_concurrency() >= 1);
+    }
+
+    #[test]
+    fn missing_key_hint_uses_parseable_model_block() {
+        let hint = missing_large_key_hint();
+        assert!(hint.contains("[[model]]\n    role=\"large\""));
+        let snippet = r#"
+[[model]]
+role="large"
+key_env="SIFT_API_KEY"
+"#;
+        let cfg = basic_toml_parse(snippet).unwrap_or_default();
+        assert_eq!(cfg.models.len(), 1);
+        assert_eq!(cfg.models[0].role, Some(Role::Large));
+    }
+
+    #[test]
+    fn absolute_module_must_stay_inside_target() {
+        let root = unique_test_dir("module-root");
+        let outside = unique_test_dir("module-outside");
+        std::fs::create_dir_all(root.join("src")).ok();
+        std::fs::create_dir_all(&outside).ok();
+        let cli = Cli {
+            target: root.clone(),
+            module: Some(outside),
+            api_key_file: None,
+            concurrency: None,
+            max_bytes: None,
+            scan_only: true,
+            self_audit: false,
+        };
+        let err = Config::resolve(cli).err().map(|e| e.to_string());
+        assert!(err.unwrap_or_default().contains("不在项目根"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn absolute_module_inside_target_is_allowed() {
+        let root = unique_test_dir("module-inside");
+        let module = root.join("src");
+        std::fs::create_dir_all(&module).ok();
+        let cli = Cli {
+            target: root.clone(),
+            module: Some(module.clone()),
+            api_key_file: None,
+            concurrency: None,
+            max_bytes: None,
+            scan_only: true,
+            self_audit: false,
+        };
+        let cfg = Config::resolve(cli).unwrap_or_else(|_| Config {
+            project_root: PathBuf::new(),
+            root: PathBuf::new(),
+            api_key: None,
+            concurrency: 1,
+            max_bytes: 1,
+            ignores: Vec::new(),
+            scan_only: true,
+            endpoint: String::new(),
+            model: String::new(),
+            small_endpoint: String::new(),
+            small_model: String::new(),
+            timeout_ms: 1,
+            max_retries: 0,
+            self_audit: false,
+            models: Vec::new(),
+        });
+        assert_eq!(cfg.root, module.canonicalize().unwrap_or(module));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sift-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
     }
 }

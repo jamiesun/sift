@@ -1,3 +1,4 @@
+mod audit;
 mod config;
 mod extract;
 mod model;
@@ -25,9 +26,32 @@ fn main() -> ExitCode {
 
     eprintln!("审计根: {}", cfg.root.display());
     eprintln!(
-        "并发: {}  单文件上限: {}B  scan_only: {}",
-        cfg.concurrency, cfg.max_bytes, cfg.scan_only
+        "并发: {}  单文件上限: {}B  scan_only: {}  self_audit: {}",
+        cfg.concurrency, cfg.max_bytes, cfg.scan_only, cfg.self_audit
     );
+
+    if cfg.self_audit {
+        match audit::write_self_audit(&cfg.project_root) {
+            Ok(result) => {
+                eprintln!(
+                    "自审计报告: {}  FAIL: {}  WARN: {}",
+                    result.path.display(),
+                    result.failures,
+                    result.warnings
+                );
+                println!("{}", result.markdown);
+                return if result.failures == 0 {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                };
+            }
+            Err(e) => {
+                eprintln!("自审计失败: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
 
     let mut reg = if cfg.scan_only {
         None
@@ -35,9 +59,7 @@ fn main() -> ExitCode {
         let r = cfg.build_registry();
         // 铁律：非 scan-only 必须有 large 模型，缺失立即退出，不挂起、不交互。
         if !r.has_large() {
-            eprintln!(
-                "未找到 large 模型 API Key。注入方式（任一）：\n  --api-key <KEY>\n  export SIFT_API_KEY=<KEY>\n  ~/.config/sift/config.toml: api_key=\"<KEY>\"\n  ~/.config/sift/config.toml: [[model]] role=\"large\" key_env=\"SIFT_API_KEY\"\n或加 --scan-only 仅跑扫描层。"
-            );
+            eprintln!("{}", config::missing_large_key_hint());
             return ExitCode::FAILURE;
         }
         eprintln!(
@@ -102,4 +124,14 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_key_hint_stays_available_to_main() {
+        assert!(config::missing_large_key_hint().contains("SIFT_API_KEY"));
+    }
 }

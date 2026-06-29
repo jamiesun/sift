@@ -33,8 +33,17 @@ pub struct AstSummary {
     pub imports: Vec<String>,
     pub signatures: Vec<String>,
     pub calls: Vec<String>,
+    /// 带行号的结构索引，供 P4 风险账本定位。
+    pub locations: Vec<AstLocation>,
     /// 跳出当前目录树的引用，交大模型脑补。
     pub external: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AstLocation {
+    pub kind: &'static str,
+    pub line: usize,
+    pub text: String,
 }
 
 /// 解析失败/坏节点返回 None 或残缺骨架，绝不 panic；解析完即 drop AST。
@@ -57,6 +66,9 @@ pub fn dehydrate(path: &Path, src: &[u8]) -> Option<AstSummary> {
     dedup(&mut sum.imports);
     dedup(&mut sum.signatures);
     dedup(&mut sum.calls);
+    sum.locations
+        .sort_by(|a, b| (a.line, a.kind, &a.text).cmp(&(b.line, b.kind, &b.text)));
+    sum.locations.dedup();
     dedup(&mut sum.external);
     Some(sum)
 }
@@ -69,6 +81,14 @@ fn first_line(node: Node, src: &[u8]) -> Option<String> {
     } else {
         Some(line.chars().take(140).collect())
     }
+}
+
+fn push_location(sum: &mut AstSummary, kind: &'static str, node: Node, text: &str) {
+    sum.locations.push(AstLocation {
+        kind,
+        line: node.start_position().row + 1,
+        text: text.to_string(),
+    });
 }
 
 fn is_external(import: &str) -> bool {
@@ -89,6 +109,7 @@ fn walk(root: Node, src: &[u8], lang: Lang, sum: &mut AstSummary) {
                     if is_external(&l) {
                         sum.external.push(format!("[EXTERNAL_BLACKBOX] {l}"));
                     }
+                    push_location(sum, "import", node, &l);
                     sum.imports.push(l);
                 }
             }
@@ -98,11 +119,13 @@ fn walk(root: Node, src: &[u8], lang: Lang, sum: &mut AstSummary) {
             )
             | (Lang::Python, "function_definition" | "class_definition") => {
                 if let Some(l) = first_line(node, src) {
+                    push_location(sum, "signature", node, &l);
                     sum.signatures.push(l);
                 }
             }
             (Lang::Rust, "call_expression") | (Lang::Python, "call") => {
                 if let Some(f) = node.child(0).and_then(|c| first_line(c, src)) {
+                    push_location(sum, "call", node, &f);
                     sum.calls.push(f);
                 }
             }
@@ -127,17 +150,22 @@ mod tests {
     #[test]
     fn rust_extracts_sig_import_call() {
         let s = b"use std::fs;\npub fn run(x: i32) -> i32 { read(x) }\nstruct P;";
-        let r = dehydrate(&PathBuf::from("a.rs"), s).unwrap();
+        let r = dehydrate(&PathBuf::from("a.rs"), s).unwrap_or_default();
         assert_eq!(r.lang, Some("rust"));
         assert!(r.imports.iter().any(|i| i.contains("std::fs")));
         assert!(r.signatures.iter().any(|i| i.contains("fn run")));
         assert!(r.calls.iter().any(|c| c.contains("read")));
+        assert!(
+            r.locations
+                .iter()
+                .any(|l| l.line == 2 && l.text.contains("read"))
+        );
     }
 
     #[test]
     fn python_extracts_def_and_external() {
         let s = b"from . import sib\nimport os\ndef f(a):\n  return g(a)\nclass C: pass";
-        let r = dehydrate(&PathBuf::from("a.py"), s).unwrap();
+        let r = dehydrate(&PathBuf::from("a.py"), s).unwrap_or_default();
         assert!(r.signatures.iter().any(|i| i.contains("def f")));
         assert!(r.signatures.iter().any(|i| i.contains("class C")));
         assert!(!r.external.is_empty());
@@ -145,7 +173,7 @@ mod tests {
 
     #[test]
     fn broken_input_no_panic() {
-        let r = dehydrate(&PathBuf::from("a.rs"), b"fn ( { ] unterminated").unwrap();
+        let r = dehydrate(&PathBuf::from("a.rs"), b"fn ( { ] unterminated").unwrap_or_default();
         assert_eq!(r.lang, Some("rust"));
     }
 

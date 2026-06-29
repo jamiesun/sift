@@ -23,10 +23,10 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
         ▼
   Models    multi-model registry · per-call hard timeout · breaker+backoff  [P2 ✓]
         ▼  ┌─ small-model pool (concurrent Map filter) ─┐
-  ReACT scheduler (state machine, skills=local fns, retry≤N)        [P3 ✓]
+  ReACT scheduler (tool protocol, skills=local fns, retry≤N)        [P3 ✓]
         │  └─ large model (Reduce convergence) ─────────┘
         ▼
-  Report    stdout Markdown risk list (line/call-chain)            [P4]
+  Report    stdout Markdown risk list (line/call-chain)            [P4 started]
         ▼
   Self-audit  sift audits sift + 10-dim scored gate               [P5/P6]
 ```
@@ -64,7 +64,7 @@ src/extract.rs    tree-sitter dehydrate → AstSummary           [P1✓]
 src/model.rs      multi-model registry/client trait/timeout    [P2✓]
 src/react.rs      ReACT state machine + skill enum/match       [P3 ✓]
 src/skills.rs     local skill fns (map filter / reduce)        [P3 ✓→P4]
-src/report.rs     Markdown risk-list renderer                  [P4]
+src/report.rs     Markdown risk-list renderer                  [P4 scaffold]
 src/audit.rs      self-audit dimension scoring                 [P5]
 ```
 
@@ -104,10 +104,10 @@ Features: tree-sitter Rust+Python, extract sig/import/calls → flat AstSummary 
 Features: ModelClient trait, registry, role routing; per-call timeout, breaker, backoff. Bounds: no cache/persist; keys env/file only, never logged. Gate: timeout/bad-response simulated, breaker trips; no plaintext keys.
 
 ### P3 ReACT scheduler — done ✓
-Features: enum state machine, large model emits `<TOOL_CALL>`, match-routes local skills; retry≤N then partial. Bounds: compile-time skills, no dynamic load. Gate: bad JSON/unknown skill/N errors all trip; react.rs tested. Small-pool concurrency wired by P4.
+Features: enum state machine, initial tool protocol prompt, large model emits `<TOOL_CALL>`, match-routes local skills via `$SEED`; retry≤N then partial. Bounds: compile-time skills, no dynamic load. Gate: bad JSON/unknown skill/N errors all trip; react.rs tested. Small-pool concurrency wired by P4.
 
 ### P4 Map+Reduce+report
-Features: small-pool concurrent filter, large convergence, line-level Markdown (+optional JSON). Bounds: module mode slices root only. Gate: hits seeded risks; module/project don't bleed.
+Features: deterministic AST coarse ledger and Markdown renderer are scaffolded; next is small-pool concurrent filter, large convergence, line-level Markdown (+optional JSON). Bounds: module mode slices root only. Gate: hits seeded risks; module/project don't bleed.
 
 ### P5 Self-audit
 Features: audit.rs scores trimmed 10 dims; `sift .` writes report to `reports/` (gitignored). Gate: `sift .` no FAIL.

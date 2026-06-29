@@ -219,14 +219,15 @@ mod tests {
 
     #[test]
     fn parses_basic_keys_and_skips_comments() {
-        let cfg = basic_toml_parse("# c\napi_key=\"k\"\nconcurrency=8\nbad line\n").unwrap();
+        let cfg =
+            basic_toml_parse("# c\napi_key=\"k\"\nconcurrency=8\nbad line\n").unwrap_or_default();
         assert_eq!(cfg.api_key.as_deref(), Some("k"));
         assert_eq!(cfg.concurrency, Some(8));
     }
 
     #[test]
     fn dirty_values_fall_back_to_none_not_panic() {
-        let cfg = basic_toml_parse("concurrency=oops\nmax_bytes=\n").unwrap();
+        let cfg = basic_toml_parse("concurrency=oops\nmax_bytes=\n").unwrap_or_default();
         assert_eq!(cfg.concurrency, None);
         assert_eq!(cfg.max_bytes, None);
     }

@@ -18,4 +18,4 @@ sift ./repo --module src        # 审子模块
 sift ./repo --api-key <KEY>     # 全链路（或 SIFT_API_KEY 环境变量）
 ```
 
-状态：P0 脚手架 + P1 AST 脱水 + P2 模型层 + P3 ReACT 调度器（状态机、编译期技能、retry→半成品）已完成。下一步 P4 接入小模型池做 Map+Reduce 报告。
+状态：P0 脚手架 + P1 AST 脱水 + P2 模型层 + P3 ReACT 调度器（工具协议、编译期技能、retry→半成品）已完成。P4 进行中：本地 AST 风险账本与 Markdown 渲染已接线；下一步接入小模型 Map 池。

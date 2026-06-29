@@ -43,7 +43,7 @@
 cargo build                    # 必须绿
 cargo test                     # 必须过
 cargo fmt && cargo clippy      # 提交前清
-grep -rn 'unwrap()\|expect(' src   # 必须为 0
+rg 'unwrap\(|expect\(|panic!' src  # 必须为 0
 sift .                         # 自审(P5+)须无 FAIL
 ```
 

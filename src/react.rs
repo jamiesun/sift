@@ -46,7 +46,7 @@ impl ReAct {
 
     /// 跑到 <FINAL> 即收敛；步数/错误超界即返回已积累的 Partial，不无限循环。
     pub fn run(&self, m: &mut dyn Completer, seed: &str) -> Outcome {
-        let mut prompt = seed.to_string();
+        let mut prompt = initial_prompt(seed);
         let mut errors = 0u32;
         let mut last = String::new();
         for _ in 0..self.max_steps {
@@ -59,9 +59,10 @@ impl ReAct {
             }
             match extract(&reply, "TOOL_CALL").and_then(|j| parse_call(&j)) {
                 Some((skill, input)) => {
-                    let obs = skill.run(&input);
+                    let tool_input = resolve_tool_input(&input, seed);
+                    let obs = skill.run(tool_input);
                     last = obs.clone();
-                    prompt = format!("OBSERVATION:\n{obs}\n下一步或 <FINAL>。");
+                    prompt = observation_prompt(&obs);
                 }
                 None => {
                     errors += 1;
@@ -73,6 +74,32 @@ impl ReAct {
             }
         }
         Outcome::Partial(partial(&last))
+    }
+}
+
+fn initial_prompt(seed: &str) -> String {
+    format!(
+        "你是 sift 的审计收敛模型。只能返回下列两种格式之一：\n\
+         1. <TOOL_CALL>{{\"skill\":\"coarse_filter\",\"input\":\"$SEED\"}}</TOOL_CALL>\n\
+         2. <FINAL>Markdown 风险清单</FINAL>\n\
+         可用技能只有 coarse_filter 和 converge。要分析下方 AST seed 时，优先用 input=\"$SEED\" 调用 coarse_filter；收到 JSON findings 后可调用 converge 或直接 FINAL。\n\
+         AST seed(JSONL):\n{seed}"
+    )
+}
+
+fn observation_prompt(obs: &str) -> String {
+    format!(
+        "OBSERVATION:\n{obs}\n\
+         下一步只能返回 <TOOL_CALL>{{\"skill\":\"converge\",\"input\":\"上面的 OBSERVATION 原文或 $SEED\"}}</TOOL_CALL> 或 <FINAL>Markdown 风险清单</FINAL>。"
+    )
+}
+
+fn resolve_tool_input<'a>(input: &'a str, seed: &'a str) -> &'a str {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed == "$SEED" {
+        seed
+    } else {
+        input
     }
 }
 
@@ -131,6 +158,42 @@ mod tests {
         assert_eq!(
             ReAct::default().run(&mut f, "seed"),
             Outcome::Final("risk: none".into())
+        );
+    }
+
+    #[test]
+    fn initial_prompt_declares_tool_protocol() {
+        let p = initial_prompt("seed");
+        assert!(p.contains("<TOOL_CALL>"));
+        assert!(p.contains("\"$SEED\""));
+        assert!(p.contains("<FINAL>"));
+    }
+
+    #[test]
+    fn seed_alias_feeds_tool_observation() {
+        struct Probe {
+            step: u8,
+        }
+        impl Completer for Probe {
+            fn ask(&mut self, prompt: &str) -> Result<String, CallError> {
+                self.step += 1;
+                if self.step == 1 {
+                    return Ok(
+                        "<TOOL_CALL>{\"skill\":\"coarse_filter\",\"input\":\"$SEED\"}</TOOL_CALL>"
+                            .into(),
+                    );
+                }
+                assert!(prompt.contains("panic-edge"));
+                Ok("<FINAL>ok</FINAL>".into())
+            }
+        }
+
+        let seed =
+            r#"{"path":"src/a.rs","locations":[{"kind":"call","line":2,"text":"x.unwrap"}]}"#;
+        let mut p = Probe { step: 0 };
+        assert_eq!(
+            ReAct::new(2, 1).run(&mut p, seed),
+            Outcome::Final("ok".into())
         );
     }
 

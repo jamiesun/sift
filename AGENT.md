@@ -43,7 +43,7 @@ A cost-controlled, single-binary open-source auditor: tree-sitter dehydration â†
 cargo build                    # must be green
 cargo test                     # tests must pass
 cargo fmt && cargo clippy      # clean before commit
-grep -rn 'unwrap()\|expect(' src   # must be 0
+rg 'unwrap\(|expect\(|panic!' src  # must be 0
 sift .                         # self-audit (P5+) must be no FAIL
 ```
 

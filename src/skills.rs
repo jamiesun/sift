@@ -2,6 +2,8 @@
 // P3 提供路由与本地观察；小模型池并发粗筛(Map)在 P4 接入。
 #![allow(dead_code)]
 
+use crate::report;
+
 /// 大模型可调度的本地技能集合。新增技能=改这里并重编译。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skill {
@@ -23,16 +25,12 @@ impl Skill {
 
     /// 本地执行，返回回灌给状态机的观察文本。绝不联网、绝不 panic。
     pub fn run(self, input: &str) -> String {
-        let n = input.chars().count();
         match self {
-            Skill::CoarseFilter => format!("[filtered:{n}chars] {}", head(input, 200)),
-            Skill::Converge => format!("[converged] {}", head(input, 200)),
+            Skill::CoarseFilter => report::findings_json_from_seed(input),
+            Skill::Converge => report::markdown_from_findings_json(input)
+                .unwrap_or_else(|| report::markdown_from_seed(input)),
         }
     }
-}
-
-fn head(s: &str, max: usize) -> String {
-    s.chars().take(max).collect()
 }
 
 #[cfg(test)]
@@ -52,7 +50,10 @@ mod tests {
 
     #[test]
     fn run_produces_observation() {
-        assert!(Skill::CoarseFilter.run("abc").contains("filtered"));
-        assert!(Skill::Converge.run("abc").contains("converged"));
+        let seed =
+            r#"{"path":"src/a.rs","locations":[{"kind":"call","line":2,"text":"x.unwrap"}]}"#;
+        let coarse = Skill::CoarseFilter.run(seed);
+        assert!(coarse.contains("panic-edge"));
+        assert!(Skill::Converge.run(&coarse).contains("风险清单"));
     }
 }

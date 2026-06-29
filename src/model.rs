@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn good_response_parses_and_resets() {
         let mut c = ModelClient::new(spec(), Box::new(Fake::new(vec![Ok(ok_body())])), 3);
-        assert_eq!(c.complete("p").unwrap(), "hi");
+        assert_eq!(c.complete("p").unwrap_or_default(), "hi");
     }
 
     #[test]

@@ -2,6 +2,7 @@ mod config;
 mod extract;
 mod model;
 mod react;
+mod report;
 mod scanner;
 mod skills;
 
@@ -82,7 +83,13 @@ fn main() -> ExitCode {
     if let Some(large) = reg.as_mut().and_then(|r| r.large.as_mut()) {
         match react::ReAct::default().run(large, &seed) {
             react::Outcome::Final(rep) => println!("\n# 审计结论\n{rep}"),
-            react::Outcome::Partial(rep) => eprintln!("部分结论(降级/超界): {rep}"),
+            react::Outcome::Partial(rep) => {
+                eprintln!("部分结论(降级/超界): {rep}");
+                println!(
+                    "\n# 本地降级审计结论\n{}",
+                    report::markdown_from_seed(&seed)
+                );
+            }
         }
     }
     ExitCode::SUCCESS

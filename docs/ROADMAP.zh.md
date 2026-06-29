@@ -23,10 +23,10 @@
         ▼
   模型层  多模型注册表 · 每调用硬超时 · 熔断+退避恢复    [P2 ✓]
         ▼  ┌─ 小模型池(并发 Map 粗筛) ──┐
-  ReACT 调度器(状态机, 技能=本地函数, retry≤N)            [P3 ✓]
+  ReACT 调度器(工具协议, 技能=本地函数, retry≤N)          [P3 ✓]
         │  └─ 大模型(Reduce 收敛) ─────┘
         ▼
-  报表层  stdout Markdown 风险清单(行号/调用链)           [P4]
+  报表层  stdout Markdown 风险清单(行号/调用链)           [P4 已启动]
         ▼
   自审计  sift 审 sift + 10 维评分门禁                    [P5/P6]
 ```
@@ -64,7 +64,7 @@ src/extract.rs    tree-sitter 脱水 → AstSummary        [P1]
 src/model.rs      多模型注册表/客户端 trait/超时熔断    [P2✓]
 src/react.rs      ReACT 状态机 + 技能 enum/match        [P3 ✓]
 src/skills.rs     本地技能函数(map粗筛/reduce收敛)      [P3 ✓→P4]
-src/report.rs     Markdown 风险清单渲染                 [P4]
+src/report.rs     Markdown 风险清单渲染                 [P4 scaffold]
 src/audit.rs      自审计维度评分(借鉴 scoot, 裁剪)      [P5]
 ```
 
@@ -110,12 +110,12 @@ timeout_ms = 60000; max_retries = 1
 - 门禁：超时/坏响应有测试模拟，熔断必触发不死磕；无明文密钥。粗筛/收敛接线留 P3。
 
 ### P3 ReACT 调度器 — 已完成 ✓
-- 功能：enum 状态机，大模型出 `<TOOL_CALL>`，match 路由本地技能；retry≤N 熔断半成品。
+- 功能：enum 状态机，初始工具协议提示，大模型出 `<TOOL_CALL>`，经 `$SEED` match 路由本地技能；retry≤N 熔断半成品。
 - 边界：技能编译期写死；无动态加载。
 - 门禁：注入坏 JSON/未注册技能/连错 N 次能熔断；react.rs 单测覆盖。小模型池并发留 P4。
 
 ### P4 Map+Reduce+报表
-- 功能：小模型池并发粗筛、大模型收敛、行号风险清单 Markdown(+可选 JSON)。
+- 功能：确定性 AST 粗筛账本与 Markdown 渲染已打底；下一步小模型池并发粗筛、大模型收敛、行号风险清单 Markdown(+可选 JSON)。
 - 边界：模块审计只切根；跨界不追。
 - 门禁：审已知样本命中预埋风险；模块/项目模式不串。
 

@@ -1,17 +1,27 @@
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use serde::Deserialize;
 
 const ENV_API_KEY: &str = "SIFT_API_KEY";
 const DEFAULT_IGNORES: &[&str] = &[
-    "node_modules", "target", "dist", "build", "vendor", ".venv", "__pycache__",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "vendor",
+    ".venv",
+    "__pycache__",
 ];
 
 /// sift — 可控成本的开源项目审计器。
 #[derive(Parser, Debug)]
-#[command(name = "sift", version, about = "分级漏斗审计：AST 脱水 → 小模型粗筛 → 大模型收敛")]
+#[command(
+    name = "sift",
+    version,
+    about = "分级漏斗审计：AST 脱水 → 小模型粗筛 → 大模型收敛"
+)]
 pub struct Cli {
     /// 要审计的项目根目录
     #[arg(default_value = ".")]
@@ -85,12 +95,21 @@ impl Config {
             .ignores
             .unwrap_or_else(|| DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect());
 
-        Ok(Self { root, api_key, concurrency, max_bytes, ignores, scan_only: cli.scan_only })
+        Ok(Self {
+            root,
+            api_key,
+            concurrency,
+            max_bytes,
+            ignores,
+            scan_only: cli.scan_only,
+        })
     }
 }
 
 fn default_concurrency() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -112,7 +131,9 @@ fn basic_toml_parse(src: &str) -> Option<FileConfig> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         let v = v.trim().trim_matches('"');
         match k.trim() {
             "api_key" => cfg.api_key = Some(v.to_string()),

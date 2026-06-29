@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::thread;
 
-use crossbeam_channel::{bounded, Receiver};
+use crossbeam_channel::{Receiver, bounded};
 use ignore::WalkBuilder;
 
 use crate::config::Config;
@@ -32,7 +32,11 @@ pub fn spawn_scan(cfg: &Config) -> Receiver<PathBuf> {
             if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
                 continue;
             }
-            if entry.metadata().map(|m| m.len() > max_bytes).unwrap_or(true) {
+            if entry
+                .metadata()
+                .map(|m| m.len() > max_bytes)
+                .unwrap_or(true)
+            {
                 continue;
             }
             if tx.send(entry.into_path()).is_err() {

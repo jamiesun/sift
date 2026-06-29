@@ -1,20 +1,16 @@
-// 技能=编译期 enum+match 本地函数，无动态加载（铁律4）。
-// P3 提供路由与本地观察；小模型池并发粗筛(Map)在 P4 接入。
-#![allow(dead_code)]
-
 use crate::report;
 
-/// 大模型可调度的本地技能集合。新增技能=改这里并重编译。
+/// Compile-time local skill set callable from the ReACT loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skill {
-    /// 粗筛：对脱水骨架做要点摘取（P4 接小模型池）。
+    /// Coarse deterministic filter over dehydrated AST rows.
     CoarseFilter,
-    /// 收敛：把观察聚合为风险结论（P4 接大模型 Reduce）。
+    /// Convert observations into a rendered risk ledger.
     Converge,
 }
 
 impl Skill {
-    /// 名称路由；未知技能返回 None，由调度器记一次失败。
+    /// Route by stable skill name. Unknown names are format failures.
     pub fn from_name(name: &str) -> Option<Skill> {
         match name.trim() {
             "coarse_filter" => Some(Skill::CoarseFilter),
@@ -23,7 +19,7 @@ impl Skill {
         }
     }
 
-    /// 本地执行，返回回灌给状态机的观察文本。绝不联网、绝不 panic。
+    /// Run locally without network access.
     pub fn run(self, input: &str) -> String {
         match self {
             Skill::CoarseFilter => report::findings_json_from_seed(input),
@@ -54,6 +50,6 @@ mod tests {
             r#"{"path":"src/a.rs","locations":[{"kind":"call","line":2,"text":"x.unwrap"}]}"#;
         let coarse = Skill::CoarseFilter.run(seed);
         assert!(coarse.contains("panic-edge"));
-        assert!(Skill::Converge.run(&coarse).contains("风险清单"));
+        assert!(Skill::Converge.run(&coarse).contains("Risk Ledger"));
     }
 }

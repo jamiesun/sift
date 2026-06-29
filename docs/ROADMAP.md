@@ -38,6 +38,8 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 - **Big/small co-scheduling.** A ReACT state machine chains coarse filter (small) and convergence (large); skills are compile-time local functions.
 - **Multi-model + concurrency.** Multiple endpoints configurable; small-model pool runs Map concurrently; large model converges once.
 - **Never grind blindly.** Every external call has a hard timeout; repeated failures trip the breaker; on trip, back off / degrade or emit a partial report — never hang.
+- **Engineering-grade by default.** A clean-looking but incomplete audit is a defect. Any skipped input, truncation, fallback, partial model result, or invalid config must be visible and testable.
+- **Stable machine contracts.** Scan JSONL, final Markdown, diagnostics, and generated reports have separate channels. Downstream scripts must be able to consume stdout without guessing whether it contains mixed formats.
 - **Memory decoupled from scale.** Stream and drop; resident memory stays low.
 - **Self-auditable.** `sift .` must pass its own audit; modular, TDD-guarded, clear boundaries.
 - **Priority on conflict:** robust > usable report > cheap > fast > small.
@@ -51,6 +53,8 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 - **No unbounded blocking.** Any subprocess/network/model call must have a deadline.
 - **Module audit must not balloon to global.** Cross-boundary refs marked and handed to the large model; no chasing.
 - **No trial-run instead of audit.** Value is the pre-adoption verdict.
+- **No scaffold masquerading as product.** Placeholders are allowed only inside explicitly unfinished phases; they must not produce reports that look production-complete.
+- **No silent fallback.** Invalid config, truncated seed, skipped files, missing model roles, and degraded model paths must fail loudly or be shown in the report.
 
 ## Code Map
 
@@ -64,7 +68,7 @@ src/extract.rs    tree-sitter dehydrate → AstSummary           [P1✓]
 src/model.rs      multi-model registry/client trait/timeout    [P2✓]
 src/react.rs      ReACT state machine + skill enum/match       [P3 ✓]
 src/skills.rs     local skill fns (map filter / reduce)        [P3 ✓→P4]
-src/report.rs     Markdown risk-list renderer                  [P4 scaffold]
+src/report.rs     Markdown risk-list renderer                  [P4]
 src/audit.rs      self-audit dimension scoring                 [P5]
 ```
 
@@ -74,12 +78,16 @@ src/audit.rs      self-audit dimension scoring                 [P5]
 concurrency = 8          # small-model concurrency cap
 [[model]]
 role = "small"           # small=filter pool / large=convergence
-endpoint = "..."; key_env = "SIFT_SMALL_KEY"
-timeout_ms = 8000; max_retries = 1
+endpoint = "..."
+key_env = "SIFT_SMALL_KEY"
+timeout_ms = 8000
+max_retries = 1
 [[model]]
 role = "large"
-endpoint = "..."; key_env = "SIFT_API_KEY"
-timeout_ms = 60000; max_retries = 1
+endpoint = "..."
+key_env = "SIFT_API_KEY"
+timeout_ms = 60000
+max_retries = 1
 ```
 Resolve order: CLI key file > ENV > toml > default; no large key ⇒ exit. Missing small model degrades to AST-only fallback.
 
@@ -90,15 +98,23 @@ Resolve order: CLI key file > ENV > toml > default; no large key ⇒ exit. Missi
 - **Backoff recovery:** transient errors retry with exponential backoff to budget; non-transient degrade (small→AST, large→partial).
 - **Budget cap:** global token/time ceiling; on hit, force-converge a `[TRUNCATED]` report.
 
+## Engineering Contract
+
+- A phase marked done must have behavior-level proof, not only type-level plumbing or happy-path unit tests.
+- Full audit stdout is the final report stream. `--scan-only` is the JSONL stream. Diagnostics stay off stdout.
+- Report coverage must disclose how much input was scanned, dehydrated, sent to models, skipped, or truncated.
+- Config files are part of the trust boundary. If a config file exists but is invalid, the process fails instead of reverting to defaults.
+- Program source under `src/` is English-only for runtime text, prompts, and comments; bilingual documentation stays in docs.
+
 ## Phased Roadmap
 
 > Each phase: feature list / boundaries / self-audit gate. All-green gate ⇒ next phase; next steps set by audit result.
 
 ### P0 Scaffold — done ✓
-Features: clap fallback resolve, bounded scanner, exit on missing key, placeholders. Bounds: no net/parse/tree. Gate: `cargo build` green, 0 unwrap, `--scan-only` scans, missing key exit1.
+Features: clap fallback resolve, bounded scanner, exit on missing key, minimal wiring. Bounds: no net/parse/tree. Gate: `cargo build` green, 0 unwrap, `--scan-only` scans, missing key exit1.
 
 ### P1 Tier-0 AST dehydrate — done ✓
-Features: tree-sitter Rust+Python, extract sig/import/calls → flat AstSummary JSON; cross-boundary `[EXTERNAL_BLACKBOX]`; drop AST. Bounds: drop bodies/comments, drop bad nodes silently. Gate: 100MB repo memory stable & no crash; extract.rs tests cover typical+broken.
+Features: tree-sitter Rust+Python, extract sig/import/calls → flat AstSummary JSON; cross-boundary `[EXTERNAL_BLACKBOX]`; drop AST. Bounds: omit bodies/comments; tolerate malformed syntax without panicking and account for incomplete coverage in downstream reporting. Gate: 100MB repo memory stable & no crash; extract.rs tests cover typical+broken.
 
 ### P2 Model layer (multi-model + breaker) — done ✓
 Features: ModelClient trait, registry, role routing; per-call timeout, breaker, backoff. Bounds: no cache/persist; keys env/file only, never logged. Gate: timeout/bad-response simulated, breaker trips; no plaintext keys.
@@ -107,10 +123,10 @@ Features: ModelClient trait, registry, role routing; per-call timeout, breaker, 
 Features: enum state machine, initial tool protocol prompt, large model emits `<TOOL_CALL>`, match-routes local skills via `$SEED`; retry≤N then partial. Bounds: compile-time skills, no dynamic load. Gate: bad JSON/unknown skill/N errors all trip; react.rs tested. Small-pool concurrency wired by P4.
 
 ### P4 Map+Reduce+report
-Features: deterministic AST coarse ledger, Markdown renderer, `[[model]]` config parsing, and small-pool Map waves are scaffolded; next is seeded-risk report gates and stronger large convergence. Bounds: module mode slices root only. Gate: hits seeded risks; module/project don't bleed.
+Features: deterministic AST coarse ledger, Markdown renderer, real `[[model]]` TOML parsing, small-pool Map waves, explicit input coverage, and clean stdout boundaries. Bounds: module mode slices root only; truncation and degraded model paths must be visible. Gate: hits seeded risks; module/project don't bleed; full-audit stdout contains only the report; invalid config fails; fake-endpoint full audit smoke proves the user-facing path.
 
 ### P5 Self-audit
-Features: audit.rs scores trimmed 10 dims; `sift . --self-audit` writes report to `reports/` (gitignored). Gate: self-audit no FAIL.
+Features: audit.rs scores trimmed dimensions; `sift . --self-audit` writes report to `reports/` (gitignored). Gate: self-audit no FAIL/WARN for hard rules, including no broad dead-code allows, no Chinese source strings/comments, clean report stream boundary, and visible seed truncation.
 
 ### P6 Release hardening
 Features: ReleaseSmall single binary, more grammars, stable JSON. Gate: single-file dist, self-audit PASS, docs↔code consistent.
@@ -120,8 +136,9 @@ Features: ReleaseSmall single binary, more grammars, stable JSON. Gate: single-f
 - Zero-config run; missing key exits with hint; never hangs.
 - 100MB repo stable memory; no crash on dirty input.
 - Report cites line numbers + cross-module deps + concurrency/resource risk.
+- Report declares input coverage and truncation state; incomplete coverage never looks like a complete verdict.
 - Every external call times out; failures trip to partial, never grind.
 - One binary audits project and `--module` without bleed.
-- `sift . --self-audit` self-audit no FAIL.
+- `sift . --self-audit` self-audit no FAIL or hard-rule WARN.
 
 > Suggestions (not rules): rayon, exact timeout/size/latency numbers per benchmark. Hard rules: single binary, fallback resolve, bounded channel, hard-timeout breaker, no unwrap, TDD, bilingual docs (EN default, ZH twin), passing self-audit.

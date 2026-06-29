@@ -1,18 +1,17 @@
-// P2 暴露的客户端 API（complete/熔断/路由）由 P3 ReACT 驱动消费；
-// 阶段交付期允许未调用，单测已覆盖超时/坏响应/跳闸。
-#![allow(dead_code)]
-
 use std::fmt;
 use std::time::Duration;
 
-/// 模型角色：small=粗筛池（Map 并发）/ large=收敛（Reduce 一次）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::Deserialize;
+
+/// Model role: small runs Map filtering, large runs Reduce convergence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     Small,
     Large,
 }
 
-/// 一个模型端点的规格。key 仅从 env/文件解析，绝不入日志。
+/// Model endpoint specification. Keys are resolved from env/files and never logged.
 pub struct ModelSpec {
     pub role: Role,
     pub endpoint: String,
@@ -22,7 +21,7 @@ pub struct ModelSpec {
     pub max_retries: u32,
 }
 
-/// 自定义 Debug：脱敏 key，杜绝密钥进日志/报告。
+/// Custom Debug redacts secrets so keys cannot leak into logs or reports.
 impl fmt::Debug for ModelSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ModelSpec")
@@ -36,7 +35,7 @@ impl fmt::Debug for ModelSpec {
     }
 }
 
-/// 传输层错误：区分可重试瞬态与不可重试。
+/// Transport failures are classified for retry decisions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
     Timeout,
@@ -46,13 +45,13 @@ pub enum TransportError {
 }
 
 impl TransportError {
-    /// 仅瞬态错误退避重试；坏响应/状态码无意义重试。
+    /// Retry only transient failures; bad bodies and status codes are terminal.
     fn transient(&self) -> bool {
         matches!(self, TransportError::Timeout | TransportError::Network)
     }
 }
 
-/// 网络抽象：单测注入假实现，无需联网即可验证超时/坏响应/熔断。
+/// Network abstraction for deterministic timeout/body/breaker tests.
 pub trait Transport: Send + Sync {
     fn post(
         &self,
@@ -63,7 +62,7 @@ pub trait Transport: Send + Sync {
     ) -> Result<String, TransportError>;
 }
 
-/// 熔断计数：连续失败 ≥ 阈值即跳闸，停止 I/O，不空转。
+/// Consecutive-failure breaker. Once tripped, callers stop I/O instead of spinning.
 #[derive(Debug)]
 struct Breaker {
     consecutive: u32,
@@ -94,7 +93,7 @@ pub enum CallError {
     Exhausted,
 }
 
-/// 单个模型客户端：硬超时 + 退避重试 + 熔断。失败永不挂起。
+/// Single model client with hard timeout, bounded retry, backoff, and breaker.
 pub struct ModelClient {
     spec: ModelSpec,
     transport: Box<dyn Transport>,
@@ -116,7 +115,7 @@ impl ModelClient {
         self.spec.role
     }
 
-    /// 发一次完成请求：含 ≤max_retries 退避重试；跳闸即拒，绝不空转。
+    /// Send one completion request with bounded retry. Tripped breakers fail fast.
     pub fn complete(&mut self, prompt: &str) -> Result<String, CallError> {
         if self.breaker.tripped() {
             return Err(CallError::Tripped);
@@ -157,7 +156,7 @@ impl ModelClient {
     }
 }
 
-/// 注册表：small 池并发粗筛、large 单点收敛；按角色路由。
+/// Registry routes small Map calls and the single large Reduce call by role.
 #[derive(Default)]
 pub struct Registry {
     pub small: Vec<ModelClient>,
@@ -168,12 +167,12 @@ impl Registry {
     pub fn has_large(&self) -> bool {
         self.large.is_some()
     }
-    /// 缺 large(收敛模型)即降级——上层据此回退 AST-only，不阻断。
+    /// Missing large model means callers must degrade to AST-only output.
     pub fn degraded(&self) -> bool {
         self.large.is_none()
     }
 
-    /// 用 small 模型池对 AST seed 做分批 Map 粗筛；失败的分片直接降级丢弃。
+    /// Run bounded Map waves over AST seed chunks. Failed chunks are dropped.
     pub fn map_small_pool(&mut self, seed: &str, max_parallel: usize) -> Option<String> {
         if self.small.is_empty() || seed.trim().is_empty() {
             return None;
@@ -249,14 +248,14 @@ fn build_chat_body(model: &str, prompt: &str) -> String {
     .to_string()
 }
 
-/// 解析 OpenAI 风格响应；任何缺字段/坏 JSON 返回 None 计入熔断。
+/// Parse OpenAI-style responses; missing fields or bad JSON count as failures.
 fn parse_content(raw: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let c = v.get("choices")?.get(0)?.get("message")?.get("content")?;
     c.as_str().map(str::to_string)
 }
 
-/// ureq 阻塞实现：硬超时，绝不无限等待。
+/// Blocking ureq transport with a mandatory timeout.
 pub struct UreqTransport;
 
 impl Transport for UreqTransport {

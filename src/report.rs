@@ -140,9 +140,9 @@ pub fn findings_from_seed(seed: &str) -> Vec<RiskFinding> {
 }
 
 pub fn render_markdown(findings: &[RiskFinding]) -> String {
-    let mut s = String::from("# 风险清单\n\n");
+    let mut s = String::from("# Risk Ledger\n\n");
     if findings.is_empty() {
-        s.push_str("未发现确定性风险。仍需人工复核动态行为、配置和跨模块语义。\n");
+        s.push_str("No deterministic risks found. Review runtime behavior, configuration, and cross-module semantics manually.\n");
         return s;
     }
 
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn renders_empty_report() {
         let md = render_markdown(&[]);
-        assert!(md.contains("未发现确定性风险"));
+        assert!(md.contains("No deterministic risks found"));
     }
 
     #[test]

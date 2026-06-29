@@ -63,7 +63,7 @@ fn run_checks(project_root: &Path) -> Vec<Check> {
         "CQ",
         !src_text.contains(&panic_call_pattern()),
         "No explicit panic macro in src",
-        "searched src for explicit panic macro",
+        "searched src for explicit panic macro calls",
     );
     push(
         &mut checks,
@@ -119,7 +119,28 @@ fn run_checks(project_root: &Path) -> Vec<Check> {
         "CC",
         dead_code_allow_status(&src_text),
         "No broad dead_code allow left in production modules",
-        "searched src for #![allow(dead_code)]",
+        "searched src for broad dead_code allow attributes",
+    );
+    push(
+        &mut checks,
+        "UX",
+        !contains_han(&src_text),
+        "Program source uses English-only comments and runtime text",
+        "searched src for CJK Unified Ideographs",
+    );
+    push(
+        &mut checks,
+        "DF",
+        stdout_boundary_is_clean(&src_text),
+        "Full audit stdout is reserved for the final report",
+        "scan JSONL should be emitted only when cfg.scan_only is true",
+    );
+    push(
+        &mut checks,
+        "DF",
+        seed_truncation_is_visible(&src_text),
+        "Model seed truncation is reported",
+        "InputCoverage should expose cap, bytes, records, and truncation state",
     );
     push(
         &mut checks,
@@ -220,11 +241,28 @@ fn test_coverage_status(files: &[PathBuf]) -> Status {
 }
 
 fn dead_code_allow_status(src_text: &str) -> Status {
-    if src_text.contains("#![allow(dead_code)]") {
-        Status::Warn
+    if src_text.contains(&dead_code_allow_pattern()) {
+        Status::Fail
     } else {
         Status::Pass
     }
+}
+
+fn contains_han(src_text: &str) -> bool {
+    src_text
+        .chars()
+        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+}
+
+fn stdout_boundary_is_clean(src_text: &str) -> bool {
+    src_text.contains("if cfg.scan_only") && src_text.contains("writeln!(out, \"{j}\")")
+}
+
+fn seed_truncation_is_visible(src_text: &str) -> bool {
+    src_text.contains("struct InputCoverage")
+        && src_text.contains("seed_cap")
+        && src_text.contains("truncated")
+        && src_text.contains("INPUT_COVERAGE")
 }
 
 fn docs_avoid_direct_api_key(project_root: &Path) -> bool {
@@ -274,11 +312,15 @@ fn direct_key_arg_patterns() -> [String; 2] {
     [["--api", "-key <"].concat(), ["--api", "-key="].concat()]
 }
 
+fn dead_code_allow_pattern() -> String {
+    ["#![allow", "(dead_code)]"].concat()
+}
+
 fn render(project_root: &Path, checks: &[Check]) -> String {
     let mut s = String::new();
-    s.push_str("# sift 自审计报告\n\n");
-    s.push_str(&format!("- 项目根: `{}`\n", project_root.display()));
-    s.push_str("- 模式: 本地确定性 P5 门禁\n\n");
+    s.push_str("# sift Self-Audit Report\n\n");
+    s.push_str(&format!("- Project root: `{}`\n", project_root.display()));
+    s.push_str("- Mode: deterministic local P5 gate\n\n");
     s.push_str("| Status | Dim | Check | Evidence |\n");
     s.push_str("|---|---|---|---|\n");
     for check in checks {
@@ -310,7 +352,7 @@ mod tests {
             evidence: "sample".to_string(),
         }];
         let md = render(Path::new("."), &checks);
-        assert!(md.contains("sift 自审计报告"));
+        assert!(md.contains("sift Self-Audit Report"));
         assert!(md.contains("PASS"));
     }
 

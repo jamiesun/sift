@@ -6,10 +6,10 @@ use ignore::WalkBuilder;
 
 use crate::config::Config;
 
-/// 通道有界容量：磁盘 I/O 太快时阻塞生产者，给内存装避震器。
+/// Bounded channel capacity; fast disk I/O back-pressures instead of growing memory.
 const CHANNEL_CAP: usize = 1024;
 
-/// 启动文件流：在后台线程遍历，主流程从 Receiver 拉路径，消费即丢。
+/// Start a background walk. The main loop consumes paths and drops them immediately.
 pub fn spawn_scan(cfg: &Config) -> Receiver<PathBuf> {
     let (tx, rx) = bounded::<PathBuf>(CHANNEL_CAP);
 

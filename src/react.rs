@@ -1,11 +1,7 @@
-// ReACT 状态机：大模型出 <TOOL_CALL>/<FINAL>，match 路由本地技能，
-// 观察回灌；坏 JSON/未知技能/连错≥N → 收口 Partial，绝不死磕(铁律2)。
-#![allow(dead_code)]
-
 use crate::model::{CallError, ModelClient};
 use crate::skills::Skill;
 
-/// 抽象“问大模型”，解耦网络，单测可注入假实现。
+/// Abstraction over large-model completion so tests can inject deterministic fakes.
 pub trait Completer {
     fn ask(&mut self, prompt: &str) -> Result<String, CallError>;
 }
@@ -37,6 +33,7 @@ impl Default for ReAct {
 }
 
 impl ReAct {
+    #[cfg(test)]
     pub fn new(max_steps: u32, max_errors: u32) -> Self {
         Self {
             max_steps: max_steps.max(1),
@@ -44,7 +41,7 @@ impl ReAct {
         }
     }
 
-    /// 跑到 <FINAL> 即收敛；步数/错误超界即返回已积累的 Partial，不无限循环。
+    /// Run until <FINAL>; bounded steps/errors return a partial result instead of looping.
     pub fn run(&self, m: &mut dyn Completer, seed: &str) -> Outcome {
         let mut prompt = initial_prompt(seed);
         let mut errors = 0u32;
@@ -69,7 +66,8 @@ impl ReAct {
                     if errors >= self.max_errors {
                         return Outcome::Partial(partial(&last));
                     }
-                    prompt = "格式错误，请回 <TOOL_CALL>{json}</TOOL_CALL> 或 <FINAL>。".into();
+                    prompt =
+                        "Invalid format. Return <TOOL_CALL>{json}</TOOL_CALL> or <FINAL>.".into();
                 }
             }
         }
@@ -79,10 +77,10 @@ impl ReAct {
 
 fn initial_prompt(seed: &str) -> String {
     format!(
-        "你是 sift 的审计收敛模型。只能返回下列两种格式之一：\n\
+        "You are sift's audit convergence model. Return exactly one of these formats:\n\
          1. <TOOL_CALL>{{\"skill\":\"coarse_filter\",\"input\":\"$SEED\"}}</TOOL_CALL>\n\
-         2. <FINAL>Markdown 风险清单</FINAL>\n\
-         可用技能只有 coarse_filter 和 converge。要分析下方 AST seed 时，优先用 input=\"$SEED\" 调用 coarse_filter；收到 JSON findings 后可调用 converge 或直接 FINAL。\n\
+         2. <FINAL>Markdown risk ledger</FINAL>\n\
+         Available skills: coarse_filter and converge. To analyze the AST seed below, first call coarse_filter with input=\"$SEED\". After JSON findings, call converge or return FINAL.\n\
          AST seed(JSONL):\n{seed}"
     )
 }
@@ -90,7 +88,7 @@ fn initial_prompt(seed: &str) -> String {
 fn observation_prompt(obs: &str) -> String {
     format!(
         "OBSERVATION:\n{obs}\n\
-         下一步只能返回 <TOOL_CALL>{{\"skill\":\"converge\",\"input\":\"上面的 OBSERVATION 原文或 $SEED\"}}</TOOL_CALL> 或 <FINAL>Markdown 风险清单</FINAL>。"
+         Next return only <TOOL_CALL>{{\"skill\":\"converge\",\"input\":\"the OBSERVATION text above or $SEED\"}}</TOOL_CALL> or <FINAL>Markdown risk ledger</FINAL>."
     )
 }
 
@@ -107,7 +105,7 @@ fn partial(last: &str) -> String {
     format!("[TRUNCATED] {last}")
 }
 
-/// 取 <TAG>..</TAG> 内容，缺标签返回 None。
+/// Extract <TAG>...</TAG> content.
 fn extract(s: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
@@ -116,7 +114,7 @@ fn extract(s: &str, tag: &str) -> Option<String> {
     Some(s[a..b].trim().to_string())
 }
 
-/// 解析 {"skill":..,"input":..}；坏 JSON/未知技能 → None 计一次失败。
+/// Parse {"skill":..,"input":..}; bad JSON or unknown skills count as format failures.
 fn parse_call(json: &str) -> Option<(Skill, String)> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let skill = Skill::from_name(v.get("skill")?.as_str()?)?;

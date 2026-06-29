@@ -38,6 +38,8 @@
 - **大小模型协同调度。** ReACT 状态机把粗筛(小)与收敛(大)编排成一条链，技能是编译期写死的本地函数。
 - **多模型 + 并发提速。** 可配置多个模型端点，小模型池并发跑 Map；大模型单点收敛。
 - **绝不无脑死磕。** 每个外部调用有硬超时；连续失败触发熔断；熔断后退避恢复或降级，到顶则输出半成品而非挂死。
+- **默认工程级。** 一份看起来完整但实际不完整的审计报告就是缺陷。跳过输入、截断、回退、半成品模型结果、无效配置都必须可见且可测试。
+- **稳定机器契约。** 扫描 JSONL、最终 Markdown、诊断信息和生成报告各走清晰通道。下游脚本消费 stdout 时不应该猜里面是否混了多种格式。
 - **内存与规模脱钩。** 流式处理、处理完即丢，常驻内存压低位。
 - **自身可审计。** sift 跑 `sift .` 应自审通过；代码模块化、TDD 守护、边界清晰。
 - **品质冲突优先级：** 鲁棒不崩 > 报表可用 > 成本低 > 速度快 > 体积小。
@@ -51,6 +53,8 @@
 - **不允许无超时阻塞。** 任何子进程/网络/模型调用必须有 deadline，无界等待视为 bug。
 - **模块审计不膨胀成全局。** 跨界引用打断点交大模型脑补，不盲目追链。
 - **不靠"直接试用"替代审计。** 价值在引入前判断。
+- **脚手架不得冒充产品能力。** 占位实现只能存在于明确未完成的阶段内；不能产出看起来像生产完成的报告。
+- **不允许静默回退。** 无效配置、seed 截断、跳过文件、缺模型角色、模型路径降级，必须明确失败或写入报告。
 
 ## 模块化结构（Code Map）
 
@@ -64,7 +68,7 @@ src/extract.rs    tree-sitter 脱水 → AstSummary        [P1]
 src/model.rs      多模型注册表/客户端 trait/超时熔断    [P2✓]
 src/react.rs      ReACT 状态机 + 技能 enum/match        [P3 ✓]
 src/skills.rs     本地技能函数(map粗筛/reduce收敛)      [P3 ✓→P4]
-src/report.rs     Markdown 风险清单渲染                 [P4 scaffold]
+src/report.rs     Markdown 风险清单渲染                 [P4]
 src/audit.rs      自审计维度评分(借鉴 scoot, 裁剪)      [P5]
 ```
 
@@ -74,12 +78,16 @@ src/audit.rs      自审计维度评分(借鉴 scoot, 裁剪)      [P5]
 concurrency = 8          # 小模型并发上限
 [[model]]                # 可多条；role 决定用途
 role = "small"           # small=粗筛池 / large=收敛
-endpoint = "..."; key_env = "SIFT_SMALL_KEY"
-timeout_ms = 8000; max_retries = 1
+endpoint = "..."
+key_env = "SIFT_SMALL_KEY"
+timeout_ms = 8000
+max_retries = 1
 [[model]]
 role = "large"
-endpoint = "..."; key_env = "SIFT_API_KEY"
-timeout_ms = 60000; max_retries = 1
+endpoint = "..."
+key_env = "SIFT_API_KEY"
+timeout_ms = 60000
+max_retries = 1
 ```
 寻址降级：CLI key file > ENV > toml > 默认；无 large key 即退。小模型缺失可降级为纯 AST 兜底。
 
@@ -90,18 +98,26 @@ timeout_ms = 60000; max_retries = 1
 - **退避恢复**：瞬时错指数退避重试到预算；非瞬时错降级（小模型回退 AST、大模型回退半成品）。
 - **预算上限**：全局 token/时长封顶，触顶强制收敛输出 `[TRUNCATED]` 报表。
 
+## 工程契约
+
+- 标记完成的阶段必须有行为级证据，不能只有类型接线或 happy-path 单测。
+- 完整审计 stdout 是最终报告流；`--scan-only` 是 JSONL 流；诊断信息不得进入 stdout。
+- 报告必须披露输入覆盖：扫描、脱水、送入模型、跳过、截断的规模。
+- 配置文件属于信任边界。配置文件存在但无效时，进程必须失败，不能退回默认值。
+- `src/` 下程序源码的运行时文本、prompt 和注释只用英文；双语文档保留在 docs。
+
 ## 阶段路线图
 
 > 每阶段含：功能清单 / 边界约束 / 自审计门禁。门禁全绿才进下阶段，并据审计结果定下一步。
 
 ### P0 脚手架 — 已完成 ✓
-- 功能：clap 降级寻址、有界通道扫描、缺 Key 熔断退出、占位。
+- 功能：clap 降级寻址、有界通道扫描、缺 Key 熔断退出、最小装配。
 - 边界：不连网、不解析、不留内存树。
 - 门禁：`cargo build` 绿 / 0 unwrap / `--scan-only` 能扫 / 缺 Key exit1。
 
 ### P1 零阶 AST 脱水 — 已完成 ✓
 - 功能：tree-sitter 接 Rust+Python，提签名/import/调用，输出扁平 AstSummary JSON；跨界打 `[EXTERNAL_BLACKBOX]`；解析即 drop。
-- 边界：丢注释与代码体；坏节点静默丢；不评价质量。
+- 边界：丢注释与代码体；遇到残缺语法不 panic，并在下游报告披露覆盖不完整；不评价质量。
 - 门禁：百兆库内存稳定低位、坏文件不崩；extract.rs 单测覆盖典型/残缺样本。
 
 ### P2 模型层（多模型+超时熔断） — 已完成 ✓
@@ -115,13 +131,13 @@ timeout_ms = 60000; max_retries = 1
 - 门禁：注入坏 JSON/未注册技能/连错 N 次能熔断；react.rs 单测覆盖。小模型池并发留 P4。
 
 ### P4 Map+Reduce+报表
-- 功能：确定性 AST 粗筛账本、Markdown 渲染、`[[model]]` 配置解析与小模型 Map 波次已打底；下一步补预埋风险报表门禁并强化大模型收敛。
-- 边界：模块审计只切根；跨界不追。
-- 门禁：审已知样本命中预埋风险；模块/项目模式不串。
+- 功能：确定性 AST 粗筛账本、Markdown 渲染、真实 `[[model]]` TOML 解析、小模型 Map 波次、显式输入覆盖率、干净 stdout 边界。
+- 边界：模块审计只切根；跨界不追；截断和模型降级路径必须可见。
+- 门禁：审已知样本命中预埋风险；模块/项目模式不串；完整审计 stdout 只含报告；无效配置失败；fake-endpoint full audit smoke 证明用户路径可用。
 
 ### P5 自审计
-- 功能：audit.rs 跑裁剪版 10 维评分(DF/CQ/RB/SEC/CC/BT/MEM 等)，`sift . --self-audit` 自审报表入 `reports/`(gitignore)。
-- 门禁：本地自审无 FAIL。
+- 功能：audit.rs 跑裁剪维度评分，`sift . --self-audit` 自审报表入 `reports/`(gitignore)。
+- 门禁：本地自审硬规则无 FAIL/WARN，包括无 broad dead-code allow、无中文源码字符串/注释、报告流边界干净、seed 截断可见。
 
 ### P6 发布加固
 - 功能：ReleaseSmall 单二进制、多语法扩展、JSON 输出稳定。
@@ -132,8 +148,9 @@ timeout_ms = 60000; max_retries = 1
 - 空配置可跑，缺 Key 即退给提示；不挂起。
 - 百兆库内存稳定、扫坏不崩。
 - 报表定位行号、含跨模块依赖与并发/资源风险，可直接拍板。
+- 报表声明输入覆盖和截断状态；覆盖不完整时绝不能看起来像完整结论。
 - 任一外部调用必超时；连错熔断出半成品而非死磕。
 - 同一二进制审项目与 `--module` 子目录不串。
-- `sift . --self-audit` 自审无 FAIL。
+- `sift . --self-audit` 自审无 FAIL，硬规则无 WARN。
 
 > 建议非铁律：rayon/具体超时阈值/体积耗时数字按基准定，别当验收红线锁死。已确立铁律：单二进制、降级寻址、有界通道、硬超时熔断、无 unwrap、TDD、自审计达标。

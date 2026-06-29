@@ -172,6 +172,67 @@ impl Registry {
     pub fn degraded(&self) -> bool {
         self.large.is_none()
     }
+
+    /// 用 small 模型池对 AST seed 做分批 Map 粗筛；失败的分片直接降级丢弃。
+    pub fn map_small_pool(&mut self, seed: &str, max_parallel: usize) -> Option<String> {
+        if self.small.is_empty() || seed.trim().is_empty() {
+            return None;
+        }
+
+        let chunks = seed_chunks(seed, 16 * 1024);
+        let wave_size = max_parallel.max(1).min(self.small.len());
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        while offset < chunks.len() {
+            let end = (offset + wave_size).min(chunks.len());
+            let wave = &chunks[offset..end];
+            let results = std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for (client, chunk) in self.small.iter_mut().zip(wave.iter()) {
+                    handles.push(scope.spawn(move || client.complete(&small_prompt(chunk))));
+                }
+                let mut results = Vec::new();
+                for handle in handles {
+                    if let Ok(Ok(text)) = handle.join() {
+                        results.push(text);
+                    }
+                }
+                results
+            });
+            out.extend(results);
+            offset = end;
+        }
+
+        if out.is_empty() {
+            None
+        } else {
+            Some(out.join("\n---\n"))
+        }
+    }
+}
+
+fn small_prompt(chunk: &str) -> String {
+    format!(
+        "You are sift's cheap Map-stage auditor. Read this dehydrated AST JSONL chunk and return only concise risk findings with file/line evidence. If no signal, return [].\nAST JSONL:\n{chunk}"
+    )
+}
+
+fn seed_chunks(seed: &str, max_bytes: usize) -> Vec<String> {
+    let max_bytes = max_bytes.max(1);
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for line in seed.lines() {
+        if !current.is_empty() && current.len() + line.len() + 1 > max_bytes {
+            chunks.push(current);
+            current = String::new();
+        }
+        current.push_str(line);
+        current.push('\n');
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 fn backoff(base: Duration, attempt: u32) {
@@ -302,5 +363,24 @@ mod tests {
     fn registry_degraded_without_large() {
         let r = Registry::default();
         assert!(r.degraded() && !r.has_large());
+    }
+
+    #[test]
+    fn seed_chunking_preserves_lines() {
+        let chunks = seed_chunks("a\nbbbb\ncc\n", 4);
+        assert_eq!(chunks, vec!["a\n", "bbbb\n", "cc\n"]);
+    }
+
+    #[test]
+    fn small_pool_maps_successful_observations() {
+        let mut reg = Registry {
+            small: vec![
+                ModelClient::new(spec(), Box::new(Fake::new(vec![Ok(ok_body())])), 3),
+                ModelClient::new(spec(), Box::new(Fake::new(vec![Ok(ok_body())])), 3),
+            ],
+            large: None,
+        };
+        let obs = reg.map_small_pool("line1\nline2\n", 2).unwrap_or_default();
+        assert!(obs.contains("hi"));
     }
 }

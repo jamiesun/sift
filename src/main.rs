@@ -23,14 +23,6 @@ fn main() -> ExitCode {
         }
     };
 
-    // 铁律：非 scan-only 必须有 Key，缺失立即退出，不挂起、不交互。
-    if !cfg.scan_only && cfg.api_key.is_none() {
-        eprintln!(
-            "未找到 API Key。注入方式（任一）：\n  --api-key <KEY>\n  export SIFT_API_KEY=<KEY>\n  ~/.config/sift/config.toml: api_key=\"<KEY>\"\n或加 --scan-only 仅跑扫描层。"
-        );
-        return ExitCode::FAILURE;
-    }
-
     eprintln!("审计根: {}", cfg.root.display());
     eprintln!(
         "并发: {}  单文件上限: {}B  scan_only: {}",
@@ -41,6 +33,13 @@ fn main() -> ExitCode {
         None
     } else {
         let r = cfg.build_registry();
+        // 铁律：非 scan-only 必须有 large 模型，缺失立即退出，不挂起、不交互。
+        if !r.has_large() {
+            eprintln!(
+                "未找到 large 模型 API Key。注入方式（任一）：\n  --api-key <KEY>\n  export SIFT_API_KEY=<KEY>\n  ~/.config/sift/config.toml: api_key=\"<KEY>\"\n  ~/.config/sift/config.toml: [[model]] role=\"large\" key_env=\"SIFT_API_KEY\"\n或加 --scan-only 仅跑扫描层。"
+            );
+            return ExitCode::FAILURE;
+        }
         eprintln!(
             "模型层: large={} small_pool={} degraded={}",
             r.has_large(),
@@ -79,9 +78,19 @@ fn main() -> ExitCode {
 
     eprintln!("扫描完成，候选文件: {count}  脱水: {dehydrated}");
 
+    let react_seed = if let Some(small_obs) = reg
+        .as_mut()
+        .and_then(|r| r.map_small_pool(&seed, cfg.concurrency))
+    {
+        eprintln!("小模型 Map 完成，observation 字节: {}", small_obs.len());
+        format!("SMALL_MODEL_OBSERVATIONS:\n{small_obs}\n\nAST_SEED:\n{seed}")
+    } else {
+        seed.clone()
+    };
+
     // ReACT 收敛：仅在有大模型时驱动；缺则降级仅出脱水流。
     if let Some(large) = reg.as_mut().and_then(|r| r.large.as_mut()) {
-        match react::ReAct::default().run(large, &seed) {
+        match react::ReAct::default().run(large, &react_seed) {
             react::Outcome::Final(rep) => println!("\n# 审计结论\n{rep}"),
             react::Outcome::Partial(rep) => {
                 eprintln!("部分结论(降级/超界): {rep}");

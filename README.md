@@ -20,7 +20,7 @@ sift ./repo --api-key <KEY>     # full pipeline (or set SIFT_API_KEY)
 
 ## Status
 
-P0 scaffold: clap fallback key resolution + bounded-channel scanner. AST / model / ReACT layers in progress.
+P0 scaffold + P1 AST dehydrate + P2 model layer (multi-model registry, hard timeout, breaker, backoff) done. ReACT scheduler (P3) wires small-filter / large-convergence next.
 
 ## Docs
 

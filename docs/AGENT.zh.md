@@ -30,8 +30,8 @@
 | `src/main.rs` | 装配：解析→Config→调度→报表→退出码 | P0 ✓ |
 | `src/config.rs` | 降级寻址、多模型配置 | P0 ✓→P2 |
 | `src/scanner.rs` | Walk + 有界通道 | P0 ✓ |
-| `src/extract.rs` | tree-sitter 脱水 → AstSummary | P1 |
-| `src/model.rs` | 模型注册表/客户端/超时/熔断 | P2 |
+| `src/extract.rs` | tree-sitter 脱水 → AstSummary | P1 ✓ |
+| `src/model.rs` | 模型注册表/客户端/超时/熔断 | P2 ✓ |
 | `src/react.rs` | ReACT 状态机 + 技能 match | P3 |
 | `src/skills.rs` | 本地技能函数(map/reduce) | P3-4 |
 | `src/report.rs` | Markdown 风险清单 | P4 |

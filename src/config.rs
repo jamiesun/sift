@@ -4,7 +4,13 @@ use anyhow::{Result, anyhow};
 use clap::Parser;
 use serde::Deserialize;
 
+use crate::model::{ModelClient, ModelSpec, Registry, Role, UreqTransport};
+
 const ENV_API_KEY: &str = "SIFT_API_KEY";
+const ENV_SMALL_KEY: &str = "SIFT_SMALL_KEY";
+const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_LARGE_MODEL: &str = "gpt-4o";
+const DEFAULT_SMALL_MODEL: &str = "gpt-4o-mini";
 const DEFAULT_IGNORES: &[&str] = &[
     "node_modules",
     "target",
@@ -54,6 +60,12 @@ struct FileConfig {
     concurrency: Option<usize>,
     max_bytes: Option<u64>,
     ignores: Option<Vec<String>>,
+    endpoint: Option<String>,
+    model: Option<String>,
+    small_endpoint: Option<String>,
+    small_model: Option<String>,
+    timeout_ms: Option<u64>,
+    max_retries: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -64,6 +76,12 @@ pub struct Config {
     pub max_bytes: u64,
     pub ignores: Vec<String>,
     pub scan_only: bool,
+    pub endpoint: String,
+    pub model: String,
+    pub small_endpoint: String,
+    pub small_model: String,
+    pub timeout_ms: u64,
+    pub max_retries: u32,
 }
 
 impl Config {
@@ -102,7 +120,51 @@ impl Config {
             max_bytes,
             ignores,
             scan_only: cli.scan_only,
+            endpoint: file
+                .endpoint
+                .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+            model: file
+                .model
+                .unwrap_or_else(|| DEFAULT_LARGE_MODEL.to_string()),
+            small_endpoint: file
+                .small_endpoint
+                .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+            small_model: file
+                .small_model
+                .unwrap_or_else(|| DEFAULT_SMALL_MODEL.to_string()),
+            timeout_ms: file.timeout_ms.unwrap_or(60_000),
+            max_retries: file.max_retries.unwrap_or(1),
         })
+    }
+
+    /// 据降级寻址结果装配多模型注册表：large=本机 api_key，small=SIFT_SMALL_KEY。
+    /// 缺 large 即降级（degraded=true），上层回退 AST-only，绝不阻断。
+    pub fn build_registry(&self) -> Registry {
+        let timeout = std::time::Duration::from_millis(self.timeout_ms);
+        let large = self.api_key.as_ref().map(|k| {
+            let spec = ModelSpec {
+                role: Role::Large,
+                endpoint: self.endpoint.clone(),
+                model: self.model.clone(),
+                key: k.clone(),
+                timeout,
+                max_retries: self.max_retries,
+            };
+            ModelClient::new(spec, Box::new(UreqTransport), 3)
+        });
+        let mut small = Vec::new();
+        if let Ok(k) = std::env::var(ENV_SMALL_KEY) {
+            let spec = ModelSpec {
+                role: Role::Small,
+                endpoint: self.small_endpoint.clone(),
+                model: self.small_model.clone(),
+                key: k,
+                timeout,
+                max_retries: self.max_retries,
+            };
+            small.push(ModelClient::new(spec, Box::new(UreqTransport), 3));
+        }
+        Registry { small, large }
     }
 }
 
@@ -139,6 +201,12 @@ fn basic_toml_parse(src: &str) -> Option<FileConfig> {
             "api_key" => cfg.api_key = Some(v.to_string()),
             "concurrency" => cfg.concurrency = v.parse().ok(),
             "max_bytes" => cfg.max_bytes = v.parse().ok(),
+            "endpoint" => cfg.endpoint = Some(v.to_string()),
+            "model" => cfg.model = Some(v.to_string()),
+            "small_endpoint" => cfg.small_endpoint = Some(v.to_string()),
+            "small_model" => cfg.small_model = Some(v.to_string()),
+            "timeout_ms" => cfg.timeout_ms = v.parse().ok(),
+            "max_retries" => cfg.max_retries = v.parse().ok(),
             _ => {}
         }
     }

@@ -30,8 +30,8 @@ A cost-controlled, single-binary open-source auditor: tree-sitter dehydration �
 | `src/main.rs` | wiring: parse→Config→schedule→report→exit | P0 ✓ |
 | `src/config.rs` | fallback resolve, multi-model config | P0 ✓→P2 |
 | `src/scanner.rs` | Walk + bounded channel | P0 ✓ |
-| `src/extract.rs` | tree-sitter dehydrate → AstSummary | P1 |
-| `src/model.rs` | model registry/client/timeout/breaker | P2 |
+| `src/extract.rs` | tree-sitter dehydrate → AstSummary | P1 ✓ |
+| `src/model.rs` | model registry/client/timeout/breaker | P2 ✓ |
 | `src/react.rs` | ReACT state machine + skill match | P3 |
 | `src/skills.rs` | local skill fns (map/reduce) | P3-4 |
 | `src/report.rs` | Markdown risk-list | P4 |

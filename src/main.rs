@@ -1,5 +1,6 @@
 mod config;
 mod extract;
+mod model;
 mod scanner;
 
 use std::io::Write;
@@ -32,6 +33,16 @@ fn main() -> ExitCode {
         "并发: {}  单文件上限: {}B  scan_only: {}",
         cfg.concurrency, cfg.max_bytes, cfg.scan_only
     );
+
+    if !cfg.scan_only {
+        let reg = cfg.build_registry();
+        eprintln!(
+            "模型层: large={} small_pool={} degraded={}",
+            reg.has_large(),
+            reg.small.len(),
+            reg.degraded()
+        );
+    }
 
     let rx = scanner::spawn_scan(&cfg);
     let mut count = 0usize;

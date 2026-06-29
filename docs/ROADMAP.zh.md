@@ -18,10 +18,10 @@
         ▼
   扫描层  ignore::Walk → 有界 channel(消费即丢)         [P0 ✓]
         ▼
-  零阶  tree-sitter 脱水(签名/import/调用) → JSON → drop AST   [P1]
+  零阶    tree-sitter 脱水(签名/import/调用) → JSON → drop AST  [P1 ✓]
         │  跨界引用打 [EXTERNAL_BLACKBOX]
         ▼
-  模型层  多模型注册表 · 每调用硬超时 · 熔断+退避恢复    [P2]
+  模型层  多模型注册表 · 每调用硬超时 · 熔断+退避恢复    [P2 ✓]
         ▼  ┌─ 小模型池(并发 Map 粗筛) ──┐
   ReACT 调度器(状态机, 技能=本地函数, retry≤N)            [P3]
         │  └─ 大模型(Reduce 收敛) ─────┘
@@ -61,7 +61,7 @@ src/main.rs       入口装配：解析→Config→调度→报表→退出码
 src/config.rs     降级寻址、多模型配置加载            [P0✓→P2扩]
 src/scanner.rs    Walk + 有界 channel                  [P0✓]
 src/extract.rs    tree-sitter 脱水 → AstSummary        [P1]
-src/model.rs      多模型注册表/客户端 trait/超时熔断    [P2]
+src/model.rs      多模型注册表/客户端 trait/超时熔断    [P2✓]
 src/react.rs      ReACT 状态机 + 技能 enum/match        [P3]
 src/skills.rs     本地技能函数(map粗筛/reduce收敛)      [P3-4]
 src/report.rs     Markdown 风险清单渲染                 [P4]
@@ -99,15 +99,15 @@ timeout_ms = 60000; max_retries = 1
 - 边界：不连网、不解析、不留内存树。
 - 门禁：`cargo build` 绿 / 0 unwrap / `--scan-only` 能扫 / 缺 Key exit1。
 
-### P1 零阶 AST 脱水
+### P1 零阶 AST 脱水 — 已完成 ✓
 - 功能：tree-sitter 接 Rust+Python，提签名/import/调用，输出扁平 AstSummary JSON；跨界打 `[EXTERNAL_BLACKBOX]`；解析即 drop。
 - 边界：丢注释与代码体；坏节点静默丢；不评价质量。
 - 门禁：百兆库内存稳定低位、坏文件不崩；extract.rs 单测覆盖典型/残缺样本。
 
-### P2 模型层（多模型+超时熔断）
+### P2 模型层（多模型+超时熔断） — 已完成 ✓
 - 功能：ModelClient trait、注册表、role 路由；每调用硬超时、熔断、退避恢复；可配多端点。
 - 边界：不写缓存、不持久化；密钥仅 env/文件、不入日志。
-- 门禁：超时/坏响应有测试模拟，熔断必触发不死磕；无明文密钥。
+- 门禁：超时/坏响应有测试模拟，熔断必触发不死磕；无明文密钥。粗筛/收敛接线留 P3。
 
 ### P3 ReACT 调度器
 - 功能：enum 状态机，大模型出 `<TOOL_CALL>`，match 路由本地技能；retry≤N 熔断半成品。

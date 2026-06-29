@@ -18,10 +18,10 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
         ▼
   Scan      ignore::Walk → bounded channel (consume & drop)        [P0 ✓]
         ▼
-  Tier-0    tree-sitter dehydrate (sig/import/calls) → JSON → drop AST  [P1]
+  Tier-0    tree-sitter dehydrate (sig/import/calls) → JSON → drop AST  [P1 ✓]
         │   cross-boundary refs marked [EXTERNAL_BLACKBOX]
         ▼
-  Models    multi-model registry · per-call hard timeout · breaker+backoff  [P2]
+  Models    multi-model registry · per-call hard timeout · breaker+backoff  [P2 ✓]
         ▼  ┌─ small-model pool (concurrent Map filter) ─┐
   ReACT scheduler (state machine, skills=local fns, retry≤N)        [P3]
         │  └─ large model (Reduce convergence) ─────────┘
@@ -60,8 +60,8 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 src/main.rs       entry wiring: parse→Config→schedule→report→exit code
 src/config.rs     fallback resolve, multi-model config         [P0✓→P2]
 src/scanner.rs    Walk + bounded channel                       [P0✓]
-src/extract.rs    tree-sitter dehydrate → AstSummary           [P1]
-src/model.rs      multi-model registry/client trait/timeout    [P2]
+src/extract.rs    tree-sitter dehydrate → AstSummary           [P1✓]
+src/model.rs      multi-model registry/client trait/timeout    [P2✓]
 src/react.rs      ReACT state machine + skill enum/match       [P3]
 src/skills.rs     local skill fns (map filter / reduce)        [P3-4]
 src/report.rs     Markdown risk-list renderer                  [P4]
@@ -97,11 +97,11 @@ Resolve order: CLI > ENV > toml > default; no large key ⇒ exit. Missing small 
 ### P0 Scaffold — done ✓
 Features: clap fallback resolve, bounded scanner, exit on missing key, placeholders. Bounds: no net/parse/tree. Gate: `cargo build` green, 0 unwrap, `--scan-only` scans, missing key exit1.
 
-### P1 Tier-0 AST dehydrate
+### P1 Tier-0 AST dehydrate — done ✓
 Features: tree-sitter Rust+Python, extract sig/import/calls → flat AstSummary JSON; cross-boundary `[EXTERNAL_BLACKBOX]`; drop AST. Bounds: drop bodies/comments, drop bad nodes silently. Gate: 100MB repo memory stable & no crash; extract.rs tests cover typical+broken.
 
-### P2 Model layer (multi-model + breaker)
-Features: ModelClient trait, registry, role routing; per-call timeout, breaker, backoff. Bounds: no cache/persist; keys env/file only, never logged. Gate: timeout/bad-response simulated, breaker trips; no plaintext keys.
+### P2 Model layer (multi-model + breaker) — done ✓
+Features: ModelClient trait, registry, role routing; per-call timeout, breaker, backoff. Bounds: no cache/persist; keys env/file only, never logged. Gate: timeout/bad-response simulated, breaker trips; no plaintext keys. Tier-0 dehydration → small filter / large convergence still wired by P3.
 
 ### P3 ReACT scheduler
 Features: enum state machine, large model emits `<TOOL_CALL>`, match-routes local skills; retry≤N then partial. Bounds: compile-time skills, no dynamic load. Gate: bad JSON/unknown skill/N errors all trip; react.rs tested.

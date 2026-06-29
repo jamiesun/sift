@@ -15,7 +15,7 @@ A cost-controlled, single-binary open-source auditor: tree-sitter dehydration â†
 3. **Single binary, low deps.** No vector DB, no embeddings/RAG, no DB, no cache. Plain-text pipeline, read once and discard.
 4. **Compile-time skills only.** Skills = `enum` + `match` local functions; no dynamic loading or runtime plugins.
 5. **Streaming, memory decoupled from scale.** Bounded channel, drop the AST after dehydrating; resident memory stays low.
-6. **Fallback key resolution.** CLI key file > ENV > config.toml > default; missing large key exits immediately with a hint, never hangs or prompts.
+6. **Fallback key resolution.** CLI key file > ENV > project `.env` > `~/.sift/config.toml` > default; missing large key exits immediately with a hint, never hangs or prompts. Missing user config is auto-created without secrets.
 7. **Secrets via env/file only.** Never compiled in, committed, printed, or logged.
 8. **Module audit must not balloon to global.** Cross-boundary refs marked `[EXTERNAL_BLACKBOX]`; do not chase.
 9. **TDD.** Each `src/*.rs` carries unit tests; build tests alongside new subsystems.
@@ -47,6 +47,7 @@ A cost-controlled, single-binary open-source auditor: tree-sitter dehydration â†
 cargo build                    # must be green
 cargo test                     # tests must pass
 cargo fmt && cargo clippy      # clean before commit
+make ci                        # mirrors local release gate
 rg 'unwrap\(|expect\(|panic!' src  # must be 0
 rg '[\p{Han}]' src             # must be 0
 sift . --self-audit            # local self-audit (P5+) must be no FAIL

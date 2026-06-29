@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::io::ErrorKind;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -19,6 +20,36 @@ const ENV_REF_SUFFIX: &str = "_ENV";
 const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
 const DEFAULT_LARGE_MODEL: &str = "gpt-4o";
 const DEFAULT_SMALL_MODEL: &str = "gpt-4o-mini";
+const DEFAULT_CONFIG: &str = r#"# sift default configuration.
+# This file is created automatically on first run at ~/.sift/config.toml.
+# Keep secrets in environment variables or key files; do not paste API keys here.
+
+max_bytes = 524288
+endpoint = "https://api.openai.com/v1/chat/completions"
+model = "gpt-4o"
+small_endpoint = "https://api.openai.com/v1/chat/completions"
+small_model = "gpt-4o-mini"
+timeout_ms = 60000
+max_retries = 1
+ignores = ["node_modules", "target", "dist", "build", "vendor", ".venv", "__pycache__"]
+
+# Example multi-model configuration:
+# [[model]]
+# role = "small"
+# endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+# model = "gpt-oss:20b-cloud"
+# key_env = "SIFT_SMALL_KEY"
+# timeout_ms = 8000
+# max_retries = 1
+#
+# [[model]]
+# role = "large"
+# endpoint = "https://api.openai.com/v1/chat/completions"
+# model = "gpt-4o"
+# key_env = "SIFT_API_KEY"
+# timeout_ms = 60000
+# max_retries = 1
+"#;
 const DEFAULT_IGNORES: &[&str] = &[
     "node_modules",
     "target",
@@ -93,7 +124,6 @@ struct FileModelConfig {
 
 #[derive(Debug)]
 pub struct Config {
-    pub project_root: PathBuf,
     pub root: PathBuf,
     pub api_key: Option<String>,
     pub concurrency: usize,
@@ -112,7 +142,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Resolve order: CLI key file > ENV > project .env > config.toml; defaults fill non-secret fields.
+    /// Resolve order: CLI key file > ENV > project .env > ~/.sift/config.toml; defaults fill non-secret fields.
     pub fn resolve(cli: Cli) -> Result<Self> {
         let project_root = cli
             .target
@@ -154,7 +184,6 @@ impl Config {
             .unwrap_or_else(|| DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect());
 
         Ok(Self {
-            project_root,
             root,
             api_key,
             concurrency,
@@ -220,8 +249,6 @@ impl Config {
 
     fn client_from_model_config(&self, m: &FileModelConfig) -> Option<ModelClient> {
         let role = m.role?;
-        let key_env = m.key_env.as_ref()?;
-        let key = self.lookup_env(key_env)?;
         let endpoint = m
             .endpoint
             .clone()
@@ -230,6 +257,11 @@ impl Config {
             .model
             .clone()
             .unwrap_or_else(|| self.default_model_for(role));
+        let key = m
+            .key_env
+            .as_ref()
+            .and_then(|key_env| self.lookup_env(key_env))
+            .or_else(|| no_auth_key_for_local(&endpoint))?;
         Some(self.new_client(
             role,
             endpoint,
@@ -298,7 +330,333 @@ impl Config {
 }
 
 pub fn missing_large_key_hint() -> &'static str {
-    "missing large-model API key. Provide one of:\n  export SIFT_API_KEY=<KEY>\n  .env:\n    SIFT_API_KEY_ENV=WJT_AZURE_OPENAI_API_KEY\n  sift ./repo --api-key-file ~/.config/sift/key\n  ~/.config/sift/config.toml:\n    api_key = \"<KEY>\"\n  ~/.config/sift/config.toml:\n    [[model]]\n    role = \"large\"\n    key_env = \"SIFT_API_KEY\"\nOr use --scan-only for scan/dehydrate only, or --self-audit for local gates."
+    "missing large-model API key. Provide one of:\n  export SIFT_API_KEY=<KEY>\n  .env:\n    SIFT_API_KEY_ENV=WJT_AZURE_OPENAI_API_KEY\n  sift ./repo --api-key-file ~/.sift/key\n  ~/.sift/config.toml:\n    api_key = \"<KEY>\"\n  ~/.sift/config.toml:\n    [[model]]\n    role = \"large\"\n    key_env = \"SIFT_API_KEY\"\nOr use --scan-only for scan/dehydrate only, or --self-audit for local gates."
+}
+
+pub fn run_doctor() -> bool {
+    let mut doctor = Doctor::default();
+    doctor.info("runtime", "sift doctor does not print secret values");
+
+    let Some(path) = config_path() else {
+        doctor.fail(
+            "config",
+            "HOME is not set; cannot resolve ~/.sift/config.toml",
+        );
+        doctor.print();
+        return false;
+    };
+    doctor.info("config", &format!("path {}", path.display()));
+
+    let src = match fs::read_to_string(&path) {
+        Ok(src) => {
+            doctor.pass("config", "file exists");
+            src
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => match create_default_config(&path) {
+            Ok(()) => {
+                doctor.warn(
+                    "config",
+                    "file was missing; created default non-secret config",
+                );
+                DEFAULT_CONFIG.to_string()
+            }
+            Err(e) => {
+                doctor.fail("config", &format!("cannot create default config: {e}"));
+                doctor.print();
+                return false;
+            }
+        },
+        Err(e) => {
+            doctor.fail("config", &format!("cannot read config: {e}"));
+            doctor.print();
+            return false;
+        }
+    };
+
+    check_config_permissions(&path, &mut doctor);
+
+    let file = match parse_file_config(&src) {
+        Ok(file) => {
+            doctor.pass("config", "TOML parses");
+            file
+        }
+        Err(e) => {
+            doctor.fail("config", &format!("invalid TOML: {e}"));
+            doctor.print();
+            return false;
+        }
+    };
+
+    check_file_config(&file, &mut doctor);
+    doctor.print();
+    !doctor.has_fail
+}
+
+#[derive(Default)]
+struct Doctor {
+    rows: Vec<DoctorRow>,
+    has_fail: bool,
+}
+
+struct DoctorRow {
+    status: &'static str,
+    area: &'static str,
+    detail: String,
+}
+
+impl Doctor {
+    fn pass(&mut self, area: &'static str, detail: &str) {
+        self.push("PASS", area, detail);
+    }
+    fn warn(&mut self, area: &'static str, detail: &str) {
+        self.push("WARN", area, detail);
+    }
+    fn fail(&mut self, area: &'static str, detail: &str) {
+        self.has_fail = true;
+        self.push("FAIL", area, detail);
+    }
+    fn info(&mut self, area: &'static str, detail: &str) {
+        self.push("INFO", area, detail);
+    }
+    fn push(&mut self, status: &'static str, area: &'static str, detail: &str) {
+        self.rows.push(DoctorRow {
+            status,
+            area,
+            detail: detail.to_string(),
+        });
+    }
+    fn print(&self) {
+        println!("# sift doctor\n");
+        println!("| Status | Area | Detail |");
+        println!("|---|---|---|");
+        for row in &self.rows {
+            println!(
+                "| {} | `{}` | {} |",
+                row.status,
+                row.area,
+                escape_markdown_cell(&row.detail)
+            );
+        }
+    }
+}
+
+fn check_config_permissions(path: &Path, doctor: &mut Doctor) {
+    let Ok(meta) = fs::metadata(path) else {
+        doctor.warn("config", "cannot inspect file permissions");
+        return;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 == 0 {
+            doctor.pass("config", &format!("permissions {:03o}", mode));
+        } else {
+            doctor.warn(
+                "config",
+                &format!(
+                    "permissions {:03o}; consider chmod 600 ~/.sift/config.toml",
+                    mode
+                ),
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        doctor.info(
+            "config",
+            "permission check is not implemented on this platform",
+        );
+    }
+}
+
+fn check_file_config(file: &FileConfig, doctor: &mut Doctor) {
+    if file.api_key.is_some() {
+        doctor.warn(
+            "secrets",
+            "api_key is set in config; prefer key_env or --api-key-file",
+        );
+    }
+
+    if file.models.is_empty() {
+        check_legacy_large_config(file, doctor);
+        return;
+    }
+
+    let mut large_available = false;
+    let mut large_declared = false;
+    for (idx, model) in file.models.iter().enumerate() {
+        let role = model.role.unwrap_or(Role::Large);
+        let label = match role {
+            Role::Small => "small",
+            Role::Large => {
+                large_declared = true;
+                "large"
+            }
+        };
+        let endpoint = model.endpoint.as_deref().unwrap_or(match role {
+            Role::Small => file.small_endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT),
+            Role::Large => file.endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT),
+        });
+        let model_name = model.model.as_deref().unwrap_or(match role {
+            Role::Small => file.small_model.as_deref().unwrap_or(DEFAULT_SMALL_MODEL),
+            Role::Large => file.model.as_deref().unwrap_or(DEFAULT_LARGE_MODEL),
+        });
+        doctor.info(
+            "model",
+            &format!("model[{idx}] role={label} endpoint={endpoint} model={model_name}"),
+        );
+
+        match model.key_env.as_deref() {
+            Some(key_env) if env_exists(key_env) => {
+                doctor.pass("secrets", &format!("model[{idx}] key_env {key_env} is set"));
+                if role == Role::Large {
+                    large_available = true;
+                }
+                check_endpoint_key_pair(idx, role, endpoint, model_name, key_env, doctor);
+            }
+            Some(key_env) => {
+                if is_local_endpoint(endpoint) {
+                    doctor.pass(
+                        "secrets",
+                        &format!(
+                            "model[{idx}] key_env {key_env} is not set; local endpoint will run without auth"
+                        ),
+                    );
+                    if role == Role::Large {
+                        large_available = true;
+                    }
+                    check_endpoint_key_pair(idx, role, endpoint, model_name, key_env, doctor);
+                } else {
+                    let msg =
+                        format!("model[{idx}] key_env {key_env} is not set; this model is skipped");
+                    match role {
+                        Role::Small => doctor.warn("secrets", &msg),
+                        Role::Large => doctor.fail("secrets", &msg),
+                    }
+                }
+            }
+            None => {
+                let fallback = env_exists(ENV_API_KEY) || file.api_key.is_some();
+                if role == Role::Large && fallback {
+                    doctor.pass(
+                        "secrets",
+                        &format!("model[{idx}] uses fallback {ENV_API_KEY} or api_key"),
+                    );
+                    large_available = true;
+                } else if is_local_endpoint(endpoint) {
+                    doctor.pass(
+                        "secrets",
+                        &format!(
+                            "model[{idx}] has no key_env; local endpoint will run without auth"
+                        ),
+                    );
+                    if role == Role::Large {
+                        large_available = true;
+                    }
+                } else {
+                    let msg = format!("model[{idx}] has no key_env; this model is skipped");
+                    match role {
+                        Role::Small => doctor.warn("secrets", &msg),
+                        Role::Large => doctor.fail("secrets", &msg),
+                    }
+                }
+            }
+        }
+    }
+
+    if !large_declared {
+        check_legacy_large_config(file, doctor);
+    } else if !large_available {
+        doctor.fail(
+            "model",
+            "no usable large model; full audit will fail before convergence",
+        );
+    }
+}
+
+fn check_legacy_large_config(file: &FileConfig, doctor: &mut Doctor) {
+    let endpoint = file.endpoint.as_deref().unwrap_or(DEFAULT_ENDPOINT);
+    let model = file.model.as_deref().unwrap_or(DEFAULT_LARGE_MODEL);
+    doctor.info(
+        "model",
+        &format!("legacy large endpoint={endpoint} model={model}"),
+    );
+    if env_exists(ENV_API_KEY) || file.api_key.is_some() {
+        doctor.pass("secrets", &format!("{ENV_API_KEY} or api_key is available"));
+    } else {
+        doctor.fail(
+            "secrets",
+            &format!("missing large-model key; set {ENV_API_KEY} or add [[model]].key_env"),
+        );
+    }
+}
+
+fn check_endpoint_key_pair(
+    idx: usize,
+    role: Role,
+    endpoint: &str,
+    model_name: &str,
+    key_env: &str,
+    doctor: &mut Doctor,
+) {
+    if is_public_openai_endpoint(endpoint) && looks_like_azure_key_env(key_env) {
+        doctor.fail(
+            "endpoint",
+            &format!(
+                "model[{idx}] uses api.openai.com with Azure-looking key_env {key_env}; this commonly returns 401"
+            ),
+        );
+    }
+    if is_azure_endpoint(endpoint) {
+        doctor.pass(
+            "endpoint",
+            &format!("model[{idx}] endpoint looks Azure; transport will send api-key header"),
+        );
+    }
+    if role == Role::Large && is_public_openai_endpoint(endpoint) && model_name.contains("5.5") {
+        doctor.warn(
+            "model",
+            &format!("model[{idx}] name {model_name} may be deployment-specific; verify it exists on api.openai.com"),
+        );
+    }
+    if role == Role::Small && is_local_endpoint(endpoint) {
+        doctor.info(
+            "endpoint",
+            &format!("model[{idx}] is local; no auth header is required"),
+        );
+    }
+}
+
+fn no_auth_key_for_local(endpoint: &str) -> Option<String> {
+    is_local_endpoint(endpoint).then(String::new)
+}
+
+fn env_exists(key: &str) -> bool {
+    std::env::var(key).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+fn is_public_openai_endpoint(endpoint: &str) -> bool {
+    endpoint.contains("api.openai.com")
+}
+
+fn is_azure_endpoint(endpoint: &str) -> bool {
+    endpoint.contains(".openai.azure.com") || endpoint.contains(".cognitiveservices.azure.com")
+}
+
+fn is_local_endpoint(endpoint: &str) -> bool {
+    endpoint.contains("://localhost")
+        || endpoint.contains("://127.0.0.1")
+        || endpoint.contains("://[::1]")
+}
+
+fn looks_like_azure_key_env(key_env: &str) -> bool {
+    key_env.to_ascii_uppercase().contains("AZURE")
+}
+
+fn escape_markdown_cell(s: &str) -> String {
+    s.replace('|', "\\|").replace('\n', " ")
 }
 
 fn default_concurrency() -> usize {
@@ -308,7 +666,11 @@ fn default_concurrency() -> usize {
 }
 
 fn config_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/sift/config.toml"))
+    std::env::var_os("HOME").map(config_path_from_home)
+}
+
+fn config_path_from_home(home: impl Into<PathBuf>) -> PathBuf {
+    home.into().join(".sift/config.toml")
 }
 
 fn load_file_config() -> Result<FileConfig> {
@@ -317,10 +679,35 @@ fn load_file_config() -> Result<FileConfig> {
     };
     let src = match std::fs::read_to_string(&path) {
         Ok(src) => src,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(FileConfig::default()),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            create_default_config(&path)
+                .with_context(|| format!("create default config file {}", path.display()))?;
+            DEFAULT_CONFIG.to_string()
+        }
         Err(e) => return Err(anyhow!("cannot read config file {}: {e}", path.display())),
     };
     parse_file_config(&src).with_context(|| format!("invalid config file {}", path.display()))
+}
+
+fn create_default_config(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create config directory {}", parent.display()))?;
+    }
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("open config file {}", path.display())),
+    };
+    file.write_all(DEFAULT_CONFIG.as_bytes())
+        .with_context(|| format!("write config file {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod config file {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn load_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
@@ -515,6 +902,34 @@ mod tests {
     }
 
     #[test]
+    fn default_config_template_is_valid_toml() {
+        let cfg = parse_file_config(DEFAULT_CONFIG).unwrap_or_default();
+        assert_eq!(cfg.max_bytes, Some(512 * 1024));
+        assert_eq!(cfg.model.as_deref(), Some(DEFAULT_LARGE_MODEL));
+        assert_eq!(cfg.small_model.as_deref(), Some(DEFAULT_SMALL_MODEL));
+        assert!(cfg.api_key.is_none());
+    }
+
+    #[test]
+    fn default_config_path_is_home_sift() {
+        assert_eq!(
+            config_path_from_home(PathBuf::from("/tmp/home")),
+            PathBuf::from("/tmp/home/.sift/config.toml")
+        );
+    }
+
+    #[test]
+    fn creates_default_config_file() {
+        let root = unique_test_dir("default-config");
+        let path = root.join(".sift/config.toml");
+        create_default_config(&path).unwrap_or_default();
+        let src = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(src.contains("sift default configuration"));
+        assert!(parse_file_config(&src).is_ok());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn parses_model_blocks() {
         let cfg = parse_file_config(
             r#"
@@ -601,6 +1016,38 @@ max_retries = 1
     }
 
     #[test]
+    fn local_model_can_omit_key_env() {
+        let file = parse_file_config(
+            r#"
+[[model]]
+role = "small"
+endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+model = "gpt-oss"
+"#,
+        )
+        .unwrap_or_default();
+        let cfg = Config {
+            root: PathBuf::new(),
+            api_key: None,
+            concurrency: 1,
+            max_bytes: 1,
+            ignores: Vec::new(),
+            scan_only: false,
+            endpoint: DEFAULT_ENDPOINT.to_string(),
+            model: DEFAULT_LARGE_MODEL.to_string(),
+            small_endpoint: DEFAULT_ENDPOINT.to_string(),
+            small_model: DEFAULT_SMALL_MODEL.to_string(),
+            timeout_ms: 1,
+            max_retries: 0,
+            self_audit: false,
+            models: file.models,
+            env_file: BTreeMap::new(),
+        };
+        let registry = cfg.build_registry();
+        assert_eq!(registry.small.len(), 1);
+    }
+
+    #[test]
     fn absolute_module_must_stay_inside_target() {
         let root = unique_test_dir("module-root");
         let outside = unique_test_dir("module-outside");
@@ -635,7 +1082,6 @@ max_retries = 1
             self_audit: false,
         };
         let cfg = Config::resolve(cli).unwrap_or_else(|_| Config {
-            project_root: PathBuf::new(),
             root: PathBuf::new(),
             api_key: None,
             concurrency: 1,

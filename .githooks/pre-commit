@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+if [ "${SIFT_SKIP_LOCAL_CI:-}" = "1" ] || [ "${SIFT_SKIP_LOCAL_CI:-}" = "true" ]; then
+  echo "sift pre-commit: skipping local CI because SIFT_SKIP_LOCAL_CI=${SIFT_SKIP_LOCAL_CI}"
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "sift pre-commit: running make local-ci"
+echo "sift pre-commit: set SIFT_SKIP_LOCAL_CI=1 to bypass intentionally"
+make local-ci
+

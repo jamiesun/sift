@@ -16,8 +16,38 @@
 sift ./repo --scan-only        # 仅扫描层
 sift ./repo --module src        # 审子模块
 SIFT_API_KEY=<KEY> sift ./repo  # 全链路
-sift ./repo --api-key-file ~/.config/sift/key
+sift ./repo --api-key-file ~/.sift/key
+sift doctor                    # 检查配置、key_env 与 endpoint/key 错配
 sift ./repo --self-audit        # 本地 P5 门禁，无需模型 Key
+```
+
+首次运行时，sift 会自动创建 `~/.sift/config.toml` 默认配置文件。默认配置只包含非密钥项；模型密钥放在环境变量里，或通过 `--api-key-file` 传入。
+
+## 支持语言
+
+扫描层目前支持 Rust、Python、Go、JavaScript、TypeScript/TSX、HTML、CSS、Zig、Bash 兼容 shell 文件（`.sh`、`.bash`、`.zsh`）、Dart、Kotlin、Java、C/C++、C#、PHP、Swift、Ruby、SQL、Dockerfile/Containerfile、YAML、HCL/Terraform、Vue 和 Svelte。
+
+## 安装
+
+源码构建：
+
+```sh
+make ci
+make install
+```
+
+安装本地 git hooks：
+
+```sh
+make githooks-install
+```
+
+pre-commit hook 会在每次提交前运行 `make local-ci`。确需临时跳过时，可执行 `SIFT_SKIP_LOCAL_CI=1 git commit ...`。
+
+macOS release 通过已有 tap 安装：
+
+```sh
+brew install jamiesun/tap/sift
 ```
 
 状态：P0 脚手架 + P1 AST 脱水 + P2 模型层 + P3 ReACT 调度器（工具协议、编译期技能、retry→半成品）已完成。P4 进行中：本地 AST 风险账本、Markdown 渲染、`[[model]]` 配置解析与小模型 Map 波次已接线。最小 P5 本地自审计已能写入 `reports/self-audit.md`；下一步补预埋风险报表门禁与更强评分。

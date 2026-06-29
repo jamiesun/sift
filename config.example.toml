@@ -1,0 +1,29 @@
+# sift default configuration.
+# Copy this to ~/.sift/config.toml or let sift create that file on first run.
+# Keep secrets in environment variables or key files; do not paste API keys here.
+
+max_bytes = 524288
+endpoint = "https://api.openai.com/v1/chat/completions"
+model = "gpt-4o"
+small_endpoint = "https://api.openai.com/v1/chat/completions"
+small_model = "gpt-4o-mini"
+timeout_ms = 60000
+max_retries = 1
+ignores = ["node_modules", "target", "dist", "build", "vendor", ".venv", "__pycache__"]
+
+# Example multi-model configuration:
+# [[model]]
+# role = "small"
+# endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+# model = "gpt-oss:20b-cloud"
+# key_env = "SIFT_SMALL_KEY"
+# timeout_ms = 8000
+# max_retries = 1
+#
+# [[model]]
+# role = "large"
+# endpoint = "https://api.openai.com/v1/chat/completions"
+# model = "gpt-4o"
+# key_env = "SIFT_API_KEY"
+# timeout_ms = 60000
+# max_retries = 1

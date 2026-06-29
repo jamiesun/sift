@@ -1,19 +1,28 @@
 # sift
 
-可控成本的开源项目审计器：**分级漏斗 + 算力错配 + ReACT 调度**。引入开源库前，不必生吞数万行代码进前沿大模型，就能拿到定位到文件/行号的风险账本。
+> English | [中文](docs/README.zh.md)
 
-- 脏活（结构提取/粗筛）→ tree-sitter + 廉价小模型
-- 逻辑收敛 → 前沿大模型，ReACT 状态机统一调度
-- 单二进制、零配置、可审项目或模块；sift 自身经得起 sift 审计
+Cost-controlled open-source project auditor: **tiered funnel + compute mismatch + ReACT scheduling**. Before adopting a dependency, get a file/line-level risk ledger without force-feeding tens of thousands of lines into a frontier model.
 
-详见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+- Grunt work (structure extraction / coarse filtering) → tree-sitter + cheap small models
+- Logic convergence → frontier large model, orchestrated by a ReACT state machine
+- Single binary, zero-config; audits a whole project or a single module; sift must pass a sift audit
 
-## 用法
+See [docs/ROADMAP.md](docs/ROADMAP.md) for full design.
+
+## Usage
 
 ```sh
-sift ./repo --scan-only        # 仅扫描层
-sift ./repo --module src        # 审子模块
-sift ./repo --api-key <KEY>     # 全链路（或 SIFT_API_KEY 环境变量）
+sift ./repo --scan-only        # scan layer only (no key needed)
+sift ./repo --module src        # audit a submodule
+sift ./repo --api-key <KEY>     # full pipeline (or set SIFT_API_KEY)
 ```
 
-状态：P0 脚手架（clap 降级寻址 + 有界通道扫描）。AST/模型/ReACT 层开发中。
+## Status
+
+P0 scaffold: clap fallback key resolution + bounded-channel scanner. AST / model / ReACT layers in progress.
+
+## Docs
+
+- [Roadmap](docs/ROADMAP.md) · [路线图](docs/ROADMAP.zh.md)
+- [Contributor handbook (AGENT.md)](AGENT.md) · [中文](docs/AGENT.zh.md)

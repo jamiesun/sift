@@ -1,77 +1,79 @@
-# sift 项目画像与开发路线图
+# sift Project Profile & Roadmap
 
-> 北极星 + 护栏 + 分阶段施工边界。说清"做成什么样 / 绝不做什么 / 每阶段交付什么 / 何时能自我审计"。
-> 项目名：**sift**（CLI 即 `sift`）。语言：Rust。
+> English | [中文](ROADMAP.zh.md)
+>
+> North star + guardrails + phased build boundaries. Defines what it should become / what it must never do / what each phase ships / when it can self-audit.
+> Name: **sift** (CLI is `sift`). Language: Rust.
 
-## 项目概述
+## Overview
 
-一个**可控成本**的开源项目审计器。引入开源库前，不必直接试用、也不必让前沿大模型生吞数万行代码，就能拿到一份定位到文件/行号的风险账本，据此决定是否引入。
+A **cost-controlled** open-source project auditor. Before adopting a library, get a file/line-level risk ledger without trial-running it or force-feeding tens of thousands of lines into a frontier model.
 
-核心是 **分级漏斗 + 算力错配 + ReACT 调度**：脏活（结构提取、粗筛压缩）交给零成本静态解析和廉价小模型；高强度逻辑收敛交给前沿大模型；一个 ReACT 状态机统一调度大小模型协同。整个工具编译为单一二进制，零配置即可审**整个项目**或**单个模块**。**sift 自身必须经得起 sift 审计。**
+Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (structure extraction, coarse filtering) goes to zero-cost static parsing and cheap small models; heavy logic convergence goes to a frontier model; a ReACT state machine orchestrates both. Ships as a single binary, zero-config, auditing a **whole project** or a **single module**. **sift itself must pass a sift audit.**
 
-- 架构图
-
-```text
-  CLI 参数 / ENV / config.toml ──(降级寻址, 缺 Key 即退)
-        ▼
-  扫描层  ignore::Walk → 有界 channel(消费即丢)         [P0 ✓]
-        ▼
-  零阶  tree-sitter 脱水(签名/import/调用) → JSON → drop AST   [P1]
-        │  跨界引用打 [EXTERNAL_BLACKBOX]
-        ▼
-  模型层  多模型注册表 · 每调用硬超时 · 熔断+退避恢复    [P2]
-        ▼  ┌─ 小模型池(并发 Map 粗筛) ──┐
-  ReACT 调度器(状态机, 技能=本地函数, retry≤N)            [P3]
-        │  └─ 大模型(Reduce 收敛) ─────┘
-        ▼
-  报表层  stdout Markdown 风险清单(行号/调用链)           [P4]
-        ▼
-  自审计  sift 审 sift + 10 维评分门禁                    [P5/P6]
-```
-
-## 项目画像（目标状态）
-
-- **零摩擦冷启动。** `sift ./repo --scan-only` 直接跑；缺配置不打断、不交互追问；缺 Key 立退给注入提示。
-- **成本可控可预算。** token 主要花在小模型；大模型只收脱水骨架。用户能预判审一个百兆库的花费。
-- **大小模型协同调度。** ReACT 状态机把粗筛(小)与收敛(大)编排成一条链，技能是编译期写死的本地函数。
-- **多模型 + 并发提速。** 可配置多个模型端点，小模型池并发跑 Map；大模型单点收敛。
-- **绝不无脑死磕。** 每个外部调用有硬超时；连续失败触发熔断；熔断后退避恢复或降级，到顶则输出半成品而非挂死。
-- **内存与规模脱钩。** 流式处理、处理完即丢，常驻内存压低位。
-- **自身可审计。** sift 跑 `sift .` 应自审通过；代码模块化、TDD 守护、边界清晰。
-- **品质冲突优先级：** 鲁棒不崩 > 报表可用 > 成本低 > 速度快 > 体积小。
-
-## 非目标（铁律）
-
-- **不做向量库 / Embedding / RAG。** 单次低频审计，索引成本大于直接拼 prompt，纯文本管道阅后即焚。
-- **不做运行时插件 / 动态技能注册。** 技能 = 编译期 enum + match 本地函数；扩展靠改码重编译。
-- **不做服务化 / Web UI / 多租户。** 一次性 CLI，无常驻、无界面。
-- **不允许 panic 主进程。** 脏数据静默丢弃记日志；幻觉/坏 JSON 走熔断；全程 Result/Option，无 unwrap/expect。
-- **不允许无超时阻塞。** 任何子进程/网络/模型调用必须有 deadline，无界等待视为 bug。
-- **模块审计不膨胀成全局。** 跨界引用打断点交大模型脑补，不盲目追链。
-- **不靠"直接试用"替代审计。** 价值在引入前判断。
-
-## 模块化结构（Code Map）
-
-> 每个 `src/*.rs` 自带单测；新子系统建则单测同建（TDD）。模块边界即责任边界，禁跨层乱伸手。
+- Architecture
 
 ```text
-src/main.rs       入口装配：解析→Config→调度→报表→退出码
-src/config.rs     降级寻址、多模型配置加载            [P0✓→P2扩]
-src/scanner.rs    Walk + 有界 channel                  [P0✓]
-src/extract.rs    tree-sitter 脱水 → AstSummary        [P1]
-src/model.rs      多模型注册表/客户端 trait/超时熔断    [P2]
-src/react.rs      ReACT 状态机 + 技能 enum/match        [P3]
-src/skills.rs     本地技能函数(map粗筛/reduce收敛)      [P3-4]
-src/report.rs     Markdown 风险清单渲染                 [P4]
-src/audit.rs      自审计维度评分(借鉴 scoot, 裁剪)      [P5]
+  CLI args / ENV / config.toml ──(fallback resolve, exit if no key)
+        ▼
+  Scan      ignore::Walk → bounded channel (consume & drop)        [P0 ✓]
+        ▼
+  Tier-0    tree-sitter dehydrate (sig/import/calls) → JSON → drop AST  [P1]
+        │   cross-boundary refs marked [EXTERNAL_BLACKBOX]
+        ▼
+  Models    multi-model registry · per-call hard timeout · breaker+backoff  [P2]
+        ▼  ┌─ small-model pool (concurrent Map filter) ─┐
+  ReACT scheduler (state machine, skills=local fns, retry≤N)        [P3]
+        │  └─ large model (Reduce convergence) ─────────┘
+        ▼
+  Report    stdout Markdown risk list (line/call-chain)            [P4]
+        ▼
+  Self-audit  sift audits sift + 10-dim scored gate               [P5/P6]
 ```
 
-## 多模型与并发（config schema）
+## Project Profile (target state)
+
+- **Zero-friction cold start.** `sift ./repo --scan-only` just runs; no interactive prompts; exits with an injection hint if the key is missing.
+- **Cost-controlled & budgetable.** Tokens mostly spent on small models; the large model only sees the dehydrated skeleton.
+- **Big/small co-scheduling.** A ReACT state machine chains coarse filter (small) and convergence (large); skills are compile-time local functions.
+- **Multi-model + concurrency.** Multiple endpoints configurable; small-model pool runs Map concurrently; large model converges once.
+- **Never grind blindly.** Every external call has a hard timeout; repeated failures trip the breaker; on trip, back off / degrade or emit a partial report — never hang.
+- **Memory decoupled from scale.** Stream and drop; resident memory stays low.
+- **Self-auditable.** `sift .` must pass its own audit; modular, TDD-guarded, clear boundaries.
+- **Priority on conflict:** robust > usable report > cheap > fast > small.
+
+## Non-goals (hard rules)
+
+- **No vector DB / embeddings / RAG.** For one-shot low-frequency audits, index upkeep costs more than prompt assembly; plain-text pipeline, read once and discard.
+- **No runtime plugins / dynamic skills.** Skills = compile-time enum + match local fns; extend by editing and recompiling.
+- **No service / Web UI / multi-tenant.** One-shot CLI only.
+- **No process panics.** Dirty data dropped & logged; hallucinations/bad JSON tripped; Result/Option throughout, no unwrap/expect.
+- **No unbounded blocking.** Any subprocess/network/model call must have a deadline.
+- **Module audit must not balloon to global.** Cross-boundary refs marked and handed to the large model; no chasing.
+- **No trial-run instead of audit.** Value is the pre-adoption verdict.
+
+## Code Map
+
+> Every `src/*.rs` carries unit tests; new subsystem ⇒ tests built alongside (TDD). Module boundaries are responsibility boundaries.
+
+```text
+src/main.rs       entry wiring: parse→Config→schedule→report→exit code
+src/config.rs     fallback resolve, multi-model config         [P0✓→P2]
+src/scanner.rs    Walk + bounded channel                       [P0✓]
+src/extract.rs    tree-sitter dehydrate → AstSummary           [P1]
+src/model.rs      multi-model registry/client trait/timeout    [P2]
+src/react.rs      ReACT state machine + skill enum/match       [P3]
+src/skills.rs     local skill fns (map filter / reduce)        [P3-4]
+src/report.rs     Markdown risk-list renderer                  [P4]
+src/audit.rs      self-audit dimension scoring                 [P5]
+```
+
+## Multi-model & concurrency (config schema)
 
 ```toml
-concurrency = 8          # 小模型并发上限
-[[model]]                # 可多条；role 决定用途
-role = "small"           # small=粗筛池 / large=收敛
+concurrency = 8          # small-model concurrency cap
+[[model]]
+role = "small"           # small=filter pool / large=convergence
 endpoint = "..."; key_env = "SIFT_SMALL_KEY"
 timeout_ms = 8000; max_retries = 1
 [[model]]
@@ -79,59 +81,47 @@ role = "large"
 endpoint = "..."; key_env = "SIFT_API_KEY"
 timeout_ms = 60000; max_retries = 1
 ```
-寻址降级：CLI > ENV > toml > 默认；无 large key 即退。小模型缺失可降级为纯 AST 兜底。
+Resolve order: CLI > ENV > toml > default; no large key ⇒ exit. Missing small model degrades to AST-only fallback.
 
-## 超时熔断与恢复（绝不死磕）
+## Timeout, breaker & recovery (never grind)
 
-- **每调用 deadline**：超时即弃，不无界等待。
-- **熔断计数器**：单链连续失败/坏 JSON/未注册技能达阈值 → break，停 I/O。
-- **退避恢复**：瞬时错指数退避重试到预算；非瞬时错降级（小模型回退 AST、大模型回退半成品）。
-- **预算上限**：全局 token/时长封顶，触顶强制收敛输出 `[TRUNCATED]` 报表。
+- **Per-call deadline:** time out and drop; no unbounded wait.
+- **Breaker counter:** consecutive failures / bad JSON / unknown skill ≥ N ⇒ break, stop I/O.
+- **Backoff recovery:** transient errors retry with exponential backoff to budget; non-transient degrade (small→AST, large→partial).
+- **Budget cap:** global token/time ceiling; on hit, force-converge a `[TRUNCATED]` report.
 
-## 阶段路线图
+## Phased Roadmap
 
-> 每阶段含：功能清单 / 边界约束 / 自审计门禁。门禁全绿才进下阶段，并据审计结果定下一步。
+> Each phase: feature list / boundaries / self-audit gate. All-green gate ⇒ next phase; next steps set by audit result.
 
-### P0 脚手架 — 已完成 ✓
-- 功能：clap 降级寻址、有界通道扫描、缺 Key 熔断退出、占位。
-- 边界：不连网、不解析、不留内存树。
-- 门禁：`cargo build` 绿 / 0 unwrap / `--scan-only` 能扫 / 缺 Key exit1。
+### P0 Scaffold — done ✓
+Features: clap fallback resolve, bounded scanner, exit on missing key, placeholders. Bounds: no net/parse/tree. Gate: `cargo build` green, 0 unwrap, `--scan-only` scans, missing key exit1.
 
-### P1 零阶 AST 脱水
-- 功能：tree-sitter 接 Rust+Python，提签名/import/调用，输出扁平 AstSummary JSON；跨界打 `[EXTERNAL_BLACKBOX]`；解析即 drop。
-- 边界：丢注释与代码体；坏节点静默丢；不评价质量。
-- 门禁：百兆库内存稳定低位、坏文件不崩；extract.rs 单测覆盖典型/残缺样本。
+### P1 Tier-0 AST dehydrate
+Features: tree-sitter Rust+Python, extract sig/import/calls → flat AstSummary JSON; cross-boundary `[EXTERNAL_BLACKBOX]`; drop AST. Bounds: drop bodies/comments, drop bad nodes silently. Gate: 100MB repo memory stable & no crash; extract.rs tests cover typical+broken.
 
-### P2 模型层（多模型+超时熔断）
-- 功能：ModelClient trait、注册表、role 路由；每调用硬超时、熔断、退避恢复；可配多端点。
-- 边界：不写缓存、不持久化；密钥仅 env/文件、不入日志。
-- 门禁：超时/坏响应有测试模拟，熔断必触发不死磕；无明文密钥。
+### P2 Model layer (multi-model + breaker)
+Features: ModelClient trait, registry, role routing; per-call timeout, breaker, backoff. Bounds: no cache/persist; keys env/file only, never logged. Gate: timeout/bad-response simulated, breaker trips; no plaintext keys.
 
-### P3 ReACT 调度器
-- 功能：enum 状态机，大模型出 `<TOOL_CALL>`，match 路由本地技能；retry≤N 熔断半成品。
-- 边界：技能编译期写死；无动态加载。
-- 门禁：注入坏 JSON/未注册技能/连错 N 次能熔断；react.rs 单测覆盖。
+### P3 ReACT scheduler
+Features: enum state machine, large model emits `<TOOL_CALL>`, match-routes local skills; retry≤N then partial. Bounds: compile-time skills, no dynamic load. Gate: bad JSON/unknown skill/N errors all trip; react.rs tested.
 
-### P4 Map+Reduce+报表
-- 功能：小模型池并发粗筛、大模型收敛、行号风险清单 Markdown(+可选 JSON)。
-- 边界：模块审计只切根；跨界不追。
-- 门禁：审已知样本命中预埋风险；模块/项目模式不串。
+### P4 Map+Reduce+report
+Features: small-pool concurrent filter, large convergence, line-level Markdown (+optional JSON). Bounds: module mode slices root only. Gate: hits seeded risks; module/project don't bleed.
 
-### P5 自审计
-- 功能：audit.rs 跑裁剪版 10 维评分(DF/CQ/RB/SEC/CC/BT/MEM 等)，`sift .` 自审报表入 `reports/`(gitignore)。
-- 门禁：`sift .` 自审无 FAIL。
+### P5 Self-audit
+Features: audit.rs scores trimmed 10 dims; `sift .` writes report to `reports/` (gitignored). Gate: `sift .` no FAIL.
 
-### P6 发布加固
-- 功能：ReleaseSmall 单二进制、多语法扩展、JSON 输出稳定。
-- 门禁：单文件分发、自审 PASS、文档↔功能一致。
+### P6 Release hardening
+Features: ReleaseSmall single binary, more grammars, stable JSON. Gate: single-file dist, self-audit PASS, docs↔code consistent.
 
-## 完成的样子
+## Definition of done
 
-- 空配置可跑，缺 Key 即退给提示；不挂起。
-- 百兆库内存稳定、扫坏不崩。
-- 报表定位行号、含跨模块依赖与并发/资源风险，可直接拍板。
-- 任一外部调用必超时；连错熔断出半成品而非死磕。
-- 同一二进制审项目与 `--module` 子目录不串。
-- `sift .` 自审无 FAIL。
+- Zero-config run; missing key exits with hint; never hangs.
+- 100MB repo stable memory; no crash on dirty input.
+- Report cites line numbers + cross-module deps + concurrency/resource risk.
+- Every external call times out; failures trip to partial, never grind.
+- One binary audits project and `--module` without bleed.
+- `sift .` self-audit no FAIL.
 
-> 建议非铁律：rayon/具体超时阈值/体积耗时数字按基准定，别当验收红线锁死。已确立铁律：单二进制、降级寻址、有界通道、硬超时熔断、无 unwrap、TDD、自审计达标。
+> Suggestions (not rules): rayon, exact timeout/size/latency numbers per benchmark. Hard rules: single binary, fallback resolve, bounded channel, hard-timeout breaker, no unwrap, TDD, bilingual docs (EN default, ZH twin), passing self-audit.

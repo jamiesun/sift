@@ -123,3 +123,27 @@ fn basic_toml_parse(src: &str) -> Option<FileConfig> {
     }
     Some(cfg)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_basic_keys_and_skips_comments() {
+        let cfg = basic_toml_parse("# c\napi_key=\"k\"\nconcurrency=8\nbad line\n").unwrap();
+        assert_eq!(cfg.api_key.as_deref(), Some("k"));
+        assert_eq!(cfg.concurrency, Some(8));
+    }
+
+    #[test]
+    fn dirty_values_fall_back_to_none_not_panic() {
+        let cfg = basic_toml_parse("concurrency=oops\nmax_bytes=\n").unwrap();
+        assert_eq!(cfg.concurrency, None);
+        assert_eq!(cfg.max_bytes, None);
+    }
+
+    #[test]
+    fn concurrency_never_zero() {
+        assert!(default_concurrency() >= 1);
+    }
+}

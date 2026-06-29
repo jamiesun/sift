@@ -32,8 +32,8 @@ A cost-controlled, single-binary open-source auditor: tree-sitter dehydration �
 | `src/scanner.rs` | Walk + bounded channel | P0 ✓ |
 | `src/extract.rs` | tree-sitter dehydrate → AstSummary | P1 ✓ |
 | `src/model.rs` | model registry/client/timeout/breaker | P2 ✓ |
-| `src/react.rs` | ReACT state machine + skill match | P3 |
-| `src/skills.rs` | local skill fns (map/reduce) | P3-4 |
+| `src/react.rs` | ReACT state machine + skill match | P3 ✓ |
+| `src/skills.rs` | local skill fns (map/reduce) | P3 ✓→P4 |
 | `src/report.rs` | Markdown risk-list | P4 |
 | `src/audit.rs` | self-audit scoring | P5 |
 

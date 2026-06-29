@@ -20,7 +20,7 @@ sift ./repo --api-key <KEY>     # full pipeline (or set SIFT_API_KEY)
 
 ## Status
 
-P0 scaffold + P1 AST dehydrate + P2 model layer (multi-model registry, hard timeout, breaker, backoff) done. ReACT scheduler (P3) wires small-filter / large-convergence next.
+P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (state machine, compile-time skills, retry→partial) done. Map+Reduce report (P4) wires the small-model pool next.
 
 ## Docs
 

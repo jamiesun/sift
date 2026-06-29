@@ -1,7 +1,9 @@
 mod config;
 mod extract;
 mod model;
+mod react;
 mod scanner;
+mod skills;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -34,19 +36,24 @@ fn main() -> ExitCode {
         cfg.concurrency, cfg.max_bytes, cfg.scan_only
     );
 
-    if !cfg.scan_only {
-        let reg = cfg.build_registry();
+    let mut reg = if cfg.scan_only {
+        None
+    } else {
+        let r = cfg.build_registry();
         eprintln!(
             "模型层: large={} small_pool={} degraded={}",
-            reg.has_large(),
-            reg.small.len(),
-            reg.degraded()
+            r.has_large(),
+            r.small.len(),
+            r.degraded()
         );
-    }
+        Some(r)
+    };
 
     let rx = scanner::spawn_scan(&cfg);
     let mut count = 0usize;
     let mut dehydrated = 0usize;
+    let mut seed = String::new();
+    const SEED_CAP: usize = 64 * 1024;
     let mut out = std::io::stdout().lock();
     for path in rx {
         count += 1;
@@ -56,6 +63,10 @@ fn main() -> ExitCode {
         if let Some(sum) = extract::dehydrate(&path, &src) {
             dehydrated += 1;
             if let Ok(j) = serde_json::to_string(&sum) {
+                if reg.is_some() && seed.len() < SEED_CAP {
+                    seed.push_str(&j);
+                    seed.push('\n');
+                }
                 // 下游管道(head/grep)关闭即 broken pipe，干净收尾而非 panic。
                 if writeln!(out, "{j}").is_err() {
                     return ExitCode::SUCCESS;
@@ -66,5 +77,13 @@ fn main() -> ExitCode {
     }
 
     eprintln!("扫描完成，候选文件: {count}  脱水: {dehydrated}");
+
+    // ReACT 收敛：仅在有大模型时驱动；缺则降级仅出脱水流。
+    if let Some(large) = reg.as_mut().and_then(|r| r.large.as_mut()) {
+        match react::ReAct::default().run(large, &seed) {
+            react::Outcome::Final(rep) => println!("\n# 审计结论\n{rep}"),
+            react::Outcome::Partial(rep) => eprintln!("部分结论(降级/超界): {rep}"),
+        }
+    }
     ExitCode::SUCCESS
 }

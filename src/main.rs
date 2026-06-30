@@ -118,7 +118,10 @@ fn main() -> ExitCode {
             log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
             continue;
         }
-        let Some(sum) = extract::dehydrate(&path, &src) else {
+        // Record paths relative to the audit root so scope classification and
+        // reports stay stable and never leak the host's absolute layout.
+        let rel = audit_relative_path(&path, &cfg.root);
+        let Some(sum) = extract::dehydrate(rel, &src) else {
             scan.parse_failed += 1;
             log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
             continue;
@@ -309,10 +312,14 @@ fn main() -> ExitCode {
         }
         if partial_reports.is_empty() {
             let output = format!(
-                "\n# {}\n\n{}\n\n{}\n\n{}",
+                "\n# {}\n\n{}\n\n{}\n\n## {}\n\n{}\n\n{}\n\n## {}\n\n{}",
                 audit_result_heading(cfg.report_language),
                 coverage.markdown_section(cfg.report_language),
                 diagnostics,
+                deterministic_ledger_heading(cfg.report_language),
+                deterministic_ledger_note(cfg.report_language),
+                report::markdown_table_from_seed_with_language(&seed, cfg.report_language),
+                model_interpretation_heading(cfg.report_language),
                 render_batch_reports(&final_reports, cfg.report_language)
             );
             println!("{output}");
@@ -328,7 +335,7 @@ fn main() -> ExitCode {
                 diagnostics,
                 render_partial_reports(&final_reports, &partial_reports, cfg.report_language),
                 local_fallback_heading(cfg.report_language),
-                report::markdown_from_seed_with_language(&seed, cfg.report_language)
+                report::markdown_table_from_seed_with_language(&seed, cfg.report_language)
             );
             println!("{output}");
             if cfg.save {
@@ -1234,6 +1241,13 @@ struct CompactSeedLocation {
     text: String,
 }
 
+/// Display a scanned file relative to the audit root. Falls back to the original
+/// path when the prefix does not match (e.g. unusual symlink layouts); this
+/// never panics because `strip_prefix` errors degrade to the absolute path.
+fn audit_relative_path<'a>(path: &'a Path, root: &Path) -> &'a Path {
+    path.strip_prefix(root).unwrap_or(path)
+}
+
 #[derive(Serialize, Default)]
 struct CompactOmitted {
     signatures: usize,
@@ -1491,6 +1505,37 @@ fn audit_result_heading(language: ReportLanguage) -> &'static str {
     }
 }
 
+/// Heading for the authoritative, model-independent deterministic ledger.
+fn deterministic_ledger_heading(language: ReportLanguage) -> &'static str {
+    match language {
+        ReportLanguage::En => "Deterministic Risk Ledger (authoritative)",
+        ReportLanguage::Zh => {
+            "\u{786e}\u{5b9a}\u{6027}\u{98ce}\u{9669}\u{53f0}\u{8d26}\u{ff08}\u{6743}\u{5a01}\u{6765}\u{6e90}\u{ff09}"
+        }
+    }
+}
+
+/// Note clarifying that the deterministic ledger is the source of truth and the
+/// model section below is interpretation, not a competing set of findings.
+fn deterministic_ledger_note(language: ReportLanguage) -> &'static str {
+    match language {
+        ReportLanguage::En => {
+            "These findings come from sift's deterministic rules and are the source of truth. Severity is capped by path scope (test and fixture paths cannot exceed Low). The model interpretation below is supplementary."
+        }
+        ReportLanguage::Zh => {
+            "\u{4ee5}\u{4e0b}\u{53d1}\u{73b0}\u{7531} sift \u{786e}\u{5b9a}\u{6027}\u{89c4}\u{5219}\u{751f}\u{6210}\u{ff0c}\u{4e3a}\u{6743}\u{5a01}\u{6765}\u{6e90}\u{3002}\u{4e25}\u{91cd}\u{6027}\u{6309}\u{8def}\u{5f84}\u{4f5c}\u{7528}\u{57df}\u{5c01}\u{9876}\u{ff08}\u{6d4b}\u{8bd5}\u{4e0e}\u{5939}\u{5177}\u{8def}\u{5f84}\u{4e0d}\u{8d85}\u{8fc7} Low\u{ff09}\u{3002}\u{4e0b}\u{65b9}\u{6a21}\u{578b}\u{89e3}\u{8bfb}\u{4ec5}\u{4f5c}\u{8865}\u{5145}\u{3002}"
+        }
+    }
+}
+
+/// Heading for the supplementary model narrative.
+fn model_interpretation_heading(language: ReportLanguage) -> &'static str {
+    match language {
+        ReportLanguage::En => "Model Interpretation",
+        ReportLanguage::Zh => "\u{6a21}\u{578b}\u{89e3}\u{8bfb}",
+    }
+}
+
 fn incomplete_audit_heading(language: ReportLanguage) -> &'static str {
     match language {
         ReportLanguage::En => "Incomplete Audit",
@@ -1523,6 +1568,23 @@ mod tests {
     #[test]
     fn missing_key_hint_stays_available_to_main() {
         assert!(config::missing_large_key_hint().contains("SIFT_API_KEY"));
+    }
+
+    #[test]
+    fn audit_relative_path_strips_root() {
+        let root = Path::new("/abs/project");
+        let file = Path::new("/abs/project/tests/fixtures/sample/install.sh");
+        assert_eq!(
+            audit_relative_path(file, root),
+            Path::new("tests/fixtures/sample/install.sh")
+        );
+    }
+
+    #[test]
+    fn audit_relative_path_falls_back_when_outside_root() {
+        let root = Path::new("/abs/project");
+        let file = Path::new("/elsewhere/package.json");
+        assert_eq!(audit_relative_path(file, root), file);
     }
 
     #[test]

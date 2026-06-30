@@ -91,19 +91,33 @@ fn initial_prompt(seed: &str, report_language: ReportLanguage) -> String {
         "You are sift's audit convergence model. Return exactly one of these formats:\n\
          1. <TOOL_CALL>{{\"skill\":\"coarse_filter\",\"input\":\"$SEED\"}}</TOOL_CALL>\n\
          2. <FINAL>Markdown risk ledger</FINAL>\n\
-         Available skills: coarse_filter and converge. To analyze the AST seed below, first call coarse_filter with input=\"$SEED\". After JSON findings, call converge or return FINAL. {}\n\
+         Available skills: coarse_filter and converge. To analyze the AST seed below, first call coarse_filter with input=\"$SEED\". After JSON findings, call converge or return FINAL. {rubric} {lang}\n\
          AST seed(JSONL):\n{seed}",
-        report_language.prompt_instruction()
+        rubric = SCOPE_RUBRIC,
+        lang = report_language.prompt_instruction()
     )
 }
 
 fn observation_prompt(obs: &str, report_language: ReportLanguage) -> String {
     format!(
         "OBSERVATION:\n{obs}\n\
-         Next return only <TOOL_CALL>{{\"skill\":\"converge\",\"input\":\"the OBSERVATION text above or $SEED\"}}</TOOL_CALL> or <FINAL>Markdown risk ledger</FINAL>. {}",
-        report_language.prompt_instruction()
+         The coarse_filter severities and scopes above are authoritative; keep them. {rubric}\n\
+         Next return only <TOOL_CALL>{{\"skill\":\"converge\",\"input\":\"the OBSERVATION text above or $SEED\"}}</TOOL_CALL> or <FINAL>Markdown risk ledger</FINAL>. {lang}",
+        rubric = SCOPE_RUBRIC,
+        lang = report_language.prompt_instruction()
     )
 }
+
+/// Scope discipline injected into every Reduce prompt so the model never
+/// inflates synthetic samples or intra-crate references into production risk.
+const SCOPE_RUBRIC: &str = "Scope rules: every finding carries a scope. \
+    Production source and CI release paths keep full severity. \
+    Test code and synthetic test fixtures (paths under tests/, fixtures/, or testdata/) \
+    must never be reported as production vulnerabilities; label them as test or fixture samples. \
+    Documentation install instructions are real but reported as docs scope. \
+    Do not promote intra-crate references (crate::, super::) to risks. \
+    Preserve the deterministic coarse_filter severities and scopes; never invent a higher severity. \
+    When evidence is insufficient, mark the item NEEDS_REVIEW instead of High.";
 
 fn resolve_tool_input<'a>(input: &'a str, seed: &'a str) -> &'a str {
     let trimmed = input.trim();
@@ -184,6 +198,16 @@ mod tests {
     fn initial_prompt_declares_report_language() {
         let p = initial_prompt("seed", ReportLanguage::Zh);
         assert!(p.contains("Simplified Chinese"));
+    }
+
+    #[test]
+    fn prompts_carry_scope_rubric() {
+        let initial = initial_prompt("seed", ReportLanguage::En);
+        assert!(initial.contains("Scope rules:"));
+        assert!(initial.contains("synthetic test fixtures"));
+        let obs = observation_prompt("OBS", ReportLanguage::En);
+        assert!(obs.contains("Scope rules:"));
+        assert!(obs.contains("authoritative"));
     }
 
     #[test]

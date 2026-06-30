@@ -370,17 +370,19 @@ fn push_location(sum: &mut AstSummary, kind: &'static str, node: Node, text: &st
 }
 
 fn is_external(import: &str) -> bool {
-    import.contains("super::")
-        || import.contains("crate::")
-        || import.trim_start().starts_with("from .")
-        || import.trim_start().starts_with("import ")
-        || import.trim_start().starts_with("@import")
-        || import.trim_start().starts_with("source ")
-        || import.trim_start().starts_with(". ")
-        || import.trim_start().starts_with("package ")
-        || import.trim_start().starts_with("require ")
-        || import.trim_start().starts_with("require(")
-        || import.trim_start().starts_with("include ")
+    // Intra-crate Rust references (`crate::`, `super::`) never leave the crate,
+    // so in a whole-project audit they are not black boxes. Only mark relative
+    // or cross-package references that the audit will not follow.
+    let trimmed = import.trim_start();
+    trimmed.starts_with("from .")
+        || trimmed.starts_with("import ")
+        || trimmed.starts_with("@import")
+        || trimmed.starts_with("source ")
+        || trimmed.starts_with(". ")
+        || trimmed.starts_with("package ")
+        || trimmed.starts_with("require ")
+        || trimmed.starts_with("require(")
+        || trimmed.starts_with("include ")
 }
 
 fn walk(root: Node, src: &[u8], lang: Lang, sum: &mut AstSummary) {
@@ -664,6 +666,17 @@ mod tests {
         assert!(r.signatures.iter().any(|i| i.contains("def f")));
         assert!(r.signatures.iter().any(|i| i.contains("class C")));
         assert!(!r.external.is_empty());
+    }
+
+    #[test]
+    fn intra_crate_rust_imports_are_not_external() {
+        let s = b"use crate::config::Config;\nuse super::helper;\nuse std::fs;";
+        let r = dehydrate(&PathBuf::from("a.rs"), s).unwrap_or_default();
+        assert!(
+            r.external.is_empty(),
+            "intra-crate refs must not be black boxes: {:?}",
+            r.external
+        );
     }
 
     #[test]

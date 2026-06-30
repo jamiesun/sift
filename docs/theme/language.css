@@ -1,0 +1,25 @@
+.sift-language-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  height: var(--menu-bar-height);
+  padding: 0 0.65rem;
+  color: var(--icons);
+  font-weight: 700;
+  line-height: var(--menu-bar-height);
+  text-decoration: none;
+}
+
+.sift-language-switch:hover {
+  color: var(--icons-hover);
+  text-decoration: none;
+}
+
+.sift-language-switch + .sift-language-switch {
+  padding-left: 0.35rem;
+}
+
+#mdbook-sidebar .chapter-link-wrapper strong {
+  display: none;
+}

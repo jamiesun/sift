@@ -122,3 +122,9 @@ P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool proto
 
 - [Roadmap](docs/ROADMAP.md) · [路线图](docs/ROADMAP.zh.md)
 - [Contributor handbook (AGENT.md)](AGENT.md) · [中文](docs/AGENT.zh.md)
+
+Build the bilingual mdBook site locally:
+
+```sh
+make docs
+```

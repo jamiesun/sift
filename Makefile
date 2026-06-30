@@ -4,7 +4,7 @@ BINDIR ?= $(PREFIX)/bin
 BINARY ?= sift
 HOOKS_PATH ?= .githooks
 
-.PHONY: all build release test fmt fmt-check clippy ci local-ci internal-gate githooks-install githooks-uninstall install uninstall clean
+.PHONY: all build release test fmt fmt-check clippy docs ci local-ci internal-gate githooks-install githooks-uninstall install uninstall clean
 
 all: build
 
@@ -25,6 +25,9 @@ fmt-check:
 
 clippy:
 	$(CARGO) clippy -- -D warnings
+
+docs:
+	mdbook build
 
 internal-gate:
 	@out="$$(mktemp)"; \

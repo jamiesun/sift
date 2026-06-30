@@ -1,0 +1,14 @@
+[book]
+title = "sift"
+authors = ["jamiesun"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/jamiesun/sift"
+edit-url-template = "https://github.com/jamiesun/sift/edit/master/docs/{path}"
+site-url = "/sift/"

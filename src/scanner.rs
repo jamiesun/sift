@@ -68,6 +68,11 @@ mod tests {
             max_bytes: Some(128),
             scan_only: true,
             agent_gate: false,
+            benchmark: false,
+            benchmark_output: None,
+            benchmark_input_1m_cost: None,
+            benchmark_output_1m_cost: None,
+            benchmark_estimated_output_tokens: None,
             report_language: crate::config::ReportLanguage::En,
             debug: false,
         };

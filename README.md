@@ -15,6 +15,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for full design.
 ```sh
 sift ./repo --scan-only        # scan layer only (no key needed)
 sift ./repo --agent-gate       # deterministic pre-run gate (no key needed)
+sift ./repo --benchmark        # scan/model budget telemetry JSON (no key needed)
 sift ./repo --module src        # audit a submodule
 SIFT_API_KEY=<KEY> sift ./repo  # full pipeline
 sift ./repo --api-key-file ~/.sift/key
@@ -52,12 +53,27 @@ Full audits keep stdout reserved for the final Markdown report. Progress,
 status, and debug diagnostics are printed to stderr so long runs do not look
 stalled and downstream tools can still pipe stdout safely.
 
+`--benchmark` is a local telemetry mode for release notes and cost checks. It
+does not call models; stdout is stable JSON unless `--benchmark-output <path>`
+is used. The report includes candidate/dehydrated/skipped counts, scan timing,
+best-available resident memory, seed bytes, planned Reduce batches, model-call
+counts, approximate token counts, and optional USD cost estimates. Pricing is
+explicit and never inferred:
+
+```sh
+sift ./repo --benchmark \
+  --benchmark-input-1m-cost 0.25 \
+  --benchmark-output-1m-cost 1.00 \
+  --benchmark-estimated-output-tokens 2000
+```
+
 ## Supported Languages
 
 The scan layer currently dehydrates Rust, Python, Go, JavaScript, TypeScript/TSX,
 HTML, CSS, Zig, Bash-compatible shell files (`.sh`, `.bash`, `.zsh`), Dart,
 Kotlin, Java, C/C++, C#, PHP, Swift, Ruby, SQL, Dockerfile/Containerfile, YAML,
-HCL/Terraform, Vue, and Svelte.
+HCL/Terraform, Vue, Svelte, `package.json`, Makefile, and Markdown install
+snippets.
 
 ## Install
 

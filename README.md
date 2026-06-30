@@ -6,7 +6,7 @@ Cost-controlled open-source project auditor: **tiered funnel + compute mismatch 
 
 - Grunt work (structure extraction / coarse filtering) → tree-sitter + cheap small models
 - Logic convergence → frontier large model, orchestrated by a ReACT state machine
-- Single binary, zero-config; audits a whole project or a single module; sift must pass a sift audit
+- Single binary, zero-config; audits a whole project or a single module; sift must pass its internal release gates
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for full design.
 
@@ -21,7 +21,6 @@ sift ./repo --api-key-file ~/.sift/key
 sift ./repo --report-language zh # request a Simplified Chinese Markdown report
 sift ./repo --debug              # print extra diagnostics to stderr
 sift doctor                    # check config, key_env, and endpoint/key mismatches
-sift ./repo --self-audit        # local P5 gate, no model key needed
 ```
 
 `--agent-gate` is a local, deterministic repo-intake gate for agents and wrapper
@@ -86,7 +85,7 @@ brew install jamiesun/tap/sift
 
 ## Status
 
-P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool protocol, compile-time skills, retry→partial) done. P4 is in progress: local AST risk ledger, Markdown renderer, `[[model]]` config parsing, and small-model Map waves are wired. A minimal P5 local self-audit now writes `reports/self-audit.md`; seeded report gates and stronger scoring come next.
+P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool protocol, compile-time skills, retry→partial) done. P4 is in progress: local AST risk ledger, Markdown renderer, `[[model]]` config parsing, and small-model Map waves are wired. Internal release gates write local reports under `reports/` for maintainers; seeded report gates and stronger scoring come next.
 
 ## Docs
 

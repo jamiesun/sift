@@ -6,7 +6,7 @@
 
 - 脏活（结构提取/粗筛）→ tree-sitter + 廉价小模型
 - 逻辑收敛 → 前沿大模型，ReACT 状态机统一调度
-- 单二进制、零配置、可审项目或模块；sift 自身经得起 sift 审计
+- 单二进制、零配置、可审项目或模块；sift 自身必须通过内部发布门禁
 
 详见 [ROADMAP.zh.md](ROADMAP.zh.md)。
 
@@ -21,7 +21,6 @@ sift ./repo --api-key-file ~/.sift/key
 sift ./repo --report-language zh # 输出中文 Markdown 报告
 sift ./repo --debug              # 向 stderr 打印更多诊断
 sift doctor                    # 检查配置、key_env 与 endpoint/key 错配
-sift ./repo --self-audit        # 本地 P5 门禁，无需模型 Key
 ```
 
 `--agent-gate` 是给 agent 和包装脚本使用的本地确定性 repo-intake
@@ -76,4 +75,4 @@ macOS release 通过已有 tap 安装：
 brew install jamiesun/tap/sift
 ```
 
-状态：P0 脚手架 + P1 AST 脱水 + P2 模型层 + P3 ReACT 调度器（工具协议、编译期技能、retry→半成品）已完成。P4 进行中：本地 AST 风险账本、Markdown 渲染、`[[model]]` 配置解析与小模型 Map 波次已接线。最小 P5 本地自审计已能写入 `reports/self-audit.md`；下一步补预埋风险报表门禁与更强评分。
+状态：P0 脚手架 + P1 AST 脱水 + P2 模型层 + P3 ReACT 调度器（工具协议、编译期技能、retry→半成品）已完成。P4 进行中：本地 AST 风险账本、Markdown 渲染、`[[model]]` 配置解析与小模型 Map 波次已接线。内部发布门禁会为维护者在 `reports/` 下写入本地报告；下一步补预埋风险报表门禁与更强评分。

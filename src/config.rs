@@ -103,10 +103,6 @@ pub struct Cli {
     /// Print extra diagnostic progress to stderr
     #[arg(long)]
     pub debug: bool,
-
-    /// Run local self-audit and write reports/self-audit.md
-    #[arg(long)]
-    pub self_audit: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -173,7 +169,6 @@ pub struct Config {
     pub max_retries: u32,
     pub report_language: ReportLanguage,
     pub debug: bool,
-    pub self_audit: bool,
     models: Vec<FileModelConfig>,
     env_file: BTreeMap<String, String>,
 }
@@ -251,7 +246,6 @@ impl Config {
                 .unwrap_or(1),
             report_language: cli.report_language,
             debug: cli.debug,
-            self_audit: cli.self_audit,
             models: file.models,
             env_file,
         })
@@ -372,7 +366,7 @@ impl Config {
 }
 
 pub fn missing_large_key_hint() -> &'static str {
-    "missing large-model API key. Provide one of:\n  export SIFT_API_KEY=<KEY>\n  .env:\n    SIFT_API_KEY_ENV=WJT_AZURE_OPENAI_API_KEY\n  sift ./repo --api-key-file ~/.sift/key\n  ~/.sift/config.toml:\n    api_key = \"<KEY>\"\n  ~/.sift/config.toml:\n    [[model]]\n    role = \"large\"\n    key_env = \"SIFT_API_KEY\"\nOr use --scan-only for scan/dehydrate only, or --self-audit for local gates."
+    "missing large-model API key. Provide one of:\n  export SIFT_API_KEY=<KEY>\n  .env:\n    SIFT_API_KEY_ENV=WJT_AZURE_OPENAI_API_KEY\n  sift ./repo --api-key-file ~/.sift/key\n  ~/.sift/config.toml:\n    api_key = \"<KEY>\"\n  ~/.sift/config.toml:\n    [[model]]\n    role = \"large\"\n    key_env = \"SIFT_API_KEY\"\nOr use --scan-only for scan/dehydrate only."
 }
 
 pub fn run_doctor() -> bool {
@@ -981,6 +975,7 @@ fn parse_role(value: &str) -> Option<Role> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn parses_basic_keys_and_skips_comments() {
@@ -1113,9 +1108,17 @@ max_retries=2
     }
 
     #[test]
+    fn self_audit_flag_is_not_public_cli_argument() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("--self-audit"));
+        assert!(Cli::try_parse_from(["sift", "--self-audit"]).is_err());
+    }
+
+    #[test]
     fn missing_key_hint_uses_parseable_model_block() {
         let hint = missing_large_key_hint();
         assert!(hint.contains("[[model]]\n    role = \"large\""));
+        assert!(!hint.contains("--self-audit"));
         let snippet = r#"
 [[model]]
 role = "large"
@@ -1185,7 +1188,6 @@ model = "gpt-oss"
             max_retries: 0,
             report_language: ReportLanguage::En,
             debug: false,
-            self_audit: false,
             models: file.models,
             env_file: BTreeMap::new(),
         };
@@ -1209,7 +1211,6 @@ model = "gpt-oss"
             agent_gate: false,
             report_language: ReportLanguage::En,
             debug: false,
-            self_audit: false,
         };
         let err = Config::resolve(cli).err().map(|e| e.to_string());
         assert!(err.unwrap_or_default().contains("outside project root"));
@@ -1231,7 +1232,6 @@ model = "gpt-oss"
             agent_gate: false,
             report_language: ReportLanguage::En,
             debug: false,
-            self_audit: false,
         };
         let cfg = Config::resolve(cli).unwrap_or_else(|_| Config {
             root: PathBuf::new(),
@@ -1249,7 +1249,6 @@ model = "gpt-oss"
             max_retries: 0,
             report_language: ReportLanguage::En,
             debug: false,
-            self_audit: false,
             models: Vec::new(),
             env_file: BTreeMap::new(),
         });
@@ -1271,7 +1270,6 @@ model = "gpt-oss"
             agent_gate: true,
             report_language: ReportLanguage::En,
             debug: false,
-            self_audit: false,
         };
 
         let err = Config::resolve(cli).err().map(|e| e.to_string());

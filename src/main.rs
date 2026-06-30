@@ -8,6 +8,7 @@ mod scanner;
 mod skills;
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -25,42 +26,11 @@ fn main() -> ExitCode {
         };
     }
 
-    let cli = Cli::parse();
-
-    if cli.self_audit {
-        let project_root = match cli.target.canonicalize() {
-            Ok(root) => root,
-            Err(e) => {
-                eprintln!(
-                    "configuration error: cannot locate project root {}: {e}",
-                    cli.target.display()
-                );
-                return ExitCode::FAILURE;
-            }
-        };
-        eprintln!("audit root: {}", project_root.display());
-        eprintln!("self_audit: true");
-        match audit::write_self_audit(&project_root) {
-            Ok(result) => {
-                eprintln!(
-                    "self-audit report: {}  FAIL: {}  WARN: {}",
-                    result.path.display(),
-                    result.failures,
-                    result.warnings
-                );
-                println!("{}", result.markdown);
-                return if result.failures == 0 {
-                    ExitCode::SUCCESS
-                } else {
-                    ExitCode::FAILURE
-                };
-            }
-            Err(e) => {
-                eprintln!("self-audit failed: {e}");
-                return ExitCode::FAILURE;
-            }
-        }
+    if let Some(target) = internal_gate_target() {
+        return run_internal_gate(target);
     }
+
+    let cli = Cli::parse();
 
     let cfg = match Config::resolve(cli) {
         Ok(c) => c,
@@ -72,12 +42,11 @@ fn main() -> ExitCode {
 
     eprintln!("audit root: {}", cfg.root.display());
     eprintln!(
-        "concurrency: {}  max_file_bytes: {}  scan_only: {}  agent_gate: {}  self_audit: {}  report_language: {}  debug: {}",
+        "concurrency: {}  max_file_bytes: {}  scan_only: {}  agent_gate: {}  report_language: {}  debug: {}",
         cfg.concurrency,
         cfg.max_bytes,
         cfg.scan_only,
         cfg.agent_gate,
-        cfg.self_audit,
         cfg.report_language.code(),
         cfg.debug
     );
@@ -324,6 +293,54 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn internal_gate_target() -> Option<PathBuf> {
+    let enabled = std::env::var("SIFT_INTERNAL_GATE").ok()?;
+    if enabled != "1" && !enabled.eq_ignore_ascii_case("true") {
+        return None;
+    }
+    Some(
+        std::env::args_os()
+            .nth(1)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".")),
+    )
+}
+
+fn run_internal_gate(target: PathBuf) -> ExitCode {
+    let project_root = match target.canonicalize() {
+        Ok(root) => root,
+        Err(e) => {
+            eprintln!(
+                "configuration error: cannot locate project root {}: {e}",
+                target.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("audit root: {}", project_root.display());
+    eprintln!("internal gate: true");
+    match audit::write_internal_gate(&project_root) {
+        Ok(result) => {
+            eprintln!(
+                "internal gate report: {}  FAIL: {}  WARN: {}",
+                result.path.display(),
+                result.failures,
+                result.warnings
+            );
+            println!("{}", result.markdown);
+            if result.failures == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("internal gate failed: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[derive(Default)]

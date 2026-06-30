@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 #[derive(Debug)]
-pub struct SelfAuditResult {
+pub struct InternalGateResult {
     pub path: PathBuf,
     pub markdown: String,
     pub failures: usize,
@@ -36,16 +36,16 @@ struct Check {
     evidence: String,
 }
 
-pub fn write_self_audit(project_root: &Path) -> Result<SelfAuditResult> {
+pub fn write_internal_gate(project_root: &Path) -> Result<InternalGateResult> {
     let checks = run_checks(project_root);
     let markdown = render(project_root, &checks);
     let failures = checks.iter().filter(|c| c.status == Status::Fail).count();
     let warnings = checks.iter().filter(|c| c.status == Status::Warn).count();
     let reports_dir = project_root.join("reports");
     fs::create_dir_all(&reports_dir).context("create reports dir")?;
-    let path = reports_dir.join("self-audit.md");
-    fs::write(&path, &markdown).context("write self-audit report")?;
-    Ok(SelfAuditResult {
+    let path = reports_dir.join("internal-gate.md");
+    fs::write(&path, &markdown).context("write internal gate report")?;
+    Ok(InternalGateResult {
         path,
         markdown,
         failures,
@@ -318,9 +318,9 @@ fn dead_code_allow_pattern() -> String {
 
 fn render(project_root: &Path, checks: &[Check]) -> String {
     let mut s = String::new();
-    s.push_str("# sift Self-Audit Report\n\n");
+    s.push_str("# sift Internal Quality Gate Report\n\n");
     s.push_str(&format!("- Project root: `{}`\n", project_root.display()));
-    s.push_str("- Mode: deterministic local P5 gate\n\n");
+    s.push_str("- Mode: deterministic maintainer gate\n\n");
     s.push_str("| Status | Dim | Check | Evidence |\n");
     s.push_str("|---|---|---|---|\n");
     for check in checks {
@@ -352,7 +352,7 @@ mod tests {
             evidence: "sample".to_string(),
         }];
         let md = render(Path::new("."), &checks);
-        assert!(md.contains("sift Self-Audit Report"));
+        assert!(md.contains("sift Internal Quality Gate Report"));
         assert!(md.contains("PASS"));
     }
 

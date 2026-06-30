@@ -14,23 +14,39 @@
   };
 
   function currentPage() {
-    let path = window.location.pathname.split("/").filter(Boolean).join("/");
-    if (path === "" || path.endsWith("/")) {
+    return normalizedPath(window.location.pathname);
+  }
+
+  function normalizedPath(pathname) {
+    const hasTrailingSlash = pathname.endsWith("/");
+    const parts = pathname.split("/").filter(Boolean);
+    let path = parts.join("/");
+    if (path === "") {
       return "index.html";
     }
-    const parts = path.split("/");
     const bookIdx = parts.lastIndexOf("book");
     if (bookIdx >= 0) {
       path = parts.slice(bookIdx + 1).join("/");
-      return path || "index.html";
-    }
-    const idx = parts.lastIndexOf("sift");
-    if (idx >= 0) {
-      path = parts.slice(idx + 1).join("/");
     } else if (parts.length > 2) {
-      path = parts.slice(-2).join("/");
+      const idx = parts.lastIndexOf("sift");
+      if (idx >= 0) {
+        path = parts.slice(idx + 1).join("/");
+      } else {
+        path = parts.slice(-2).join("/");
+      }
+    } else {
+      const idx = parts.lastIndexOf("sift");
+      if (idx >= 0) {
+        path = parts.slice(idx + 1).join("/");
+      }
     }
-    return path || "index.html";
+    if (path === "") {
+      return "index.html";
+    }
+    if (hasTrailingSlash || !path.split("/").pop().includes(".")) {
+      return path.replace(/\/$/, "") + "/index.html";
+    }
+    return path;
   }
 
   function rootPrefix() {
@@ -111,19 +127,7 @@
   function normalizedHref(link) {
     const href = link.getAttribute("href") || "";
     const url = new URL(href, window.location.href);
-    let path = url.pathname.split("/").filter(Boolean).join("/");
-    const parts = path.split("/");
-    const bookIdx = parts.lastIndexOf("book");
-    if (bookIdx >= 0) {
-      return parts.slice(bookIdx + 1).join("/") || "index.html";
-    }
-    const idx = parts.lastIndexOf("sift");
-    if (idx >= 0) {
-      path = parts.slice(idx + 1).join("/");
-    } else if (parts.length > 2) {
-      path = parts.slice(-2).join("/");
-    }
-    return path || "index.html";
+    return normalizedPath(url.pathname);
   }
 
   function languageForHref(href) {

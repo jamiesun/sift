@@ -4,7 +4,7 @@ BINDIR ?= $(PREFIX)/bin
 BINARY ?= sift
 HOOKS_PATH ?= .githooks
 
-.PHONY: all build release test fmt fmt-check clippy ci local-ci self-audit githooks-install githooks-uninstall install uninstall clean
+.PHONY: all build release test fmt fmt-check clippy ci local-ci internal-gate githooks-install githooks-uninstall install uninstall clean
 
 all: build
 
@@ -26,10 +26,17 @@ fmt-check:
 clippy:
 	$(CARGO) clippy -- -D warnings
 
-self-audit:
-	$(CARGO) run -- --self-audit
+internal-gate:
+	@out="$$(mktemp)"; \
+	if SIFT_INTERNAL_GATE=1 $(CARGO) run --quiet -- . >"$$out" 2>&1; then \
+		/bin/rm -f "$$out"; \
+	else \
+		cat "$$out"; \
+		/bin/rm -f "$$out"; \
+		exit 1; \
+	fi
 
-ci: fmt-check test clippy self-audit
+ci: fmt-check test clippy internal-gate
 
 local-ci: ci
 

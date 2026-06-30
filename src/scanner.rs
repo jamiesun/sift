@@ -70,7 +70,6 @@ mod tests {
             agent_gate: false,
             report_language: crate::config::ReportLanguage::En,
             debug: false,
-            self_audit: false,
         };
         let cfg = Config::resolve(cli);
         assert!(cfg.is_ok(), "test config should resolve");

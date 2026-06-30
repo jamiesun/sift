@@ -2,14 +2,14 @@
 
 > English | [中文](ROADMAP.zh.md)
 >
-> North star + guardrails + phased build boundaries. Defines what it should become / what it must never do / what each phase ships / when it can self-audit.
+> North star + guardrails + phased build boundaries. Defines what it should become / what it must never do / what each phase ships / when internal gates apply.
 > Name: **sift** (CLI is `sift`). Language: Rust.
 
 ## Overview
 
 A **cost-controlled** open-source project auditor. Before adopting a library, get a file/line-level risk ledger without trial-running it or force-feeding tens of thousands of lines into a frontier model.
 
-Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (structure extraction, coarse filtering) goes to zero-cost static parsing and cheap small models; heavy logic convergence goes to a frontier model; a ReACT state machine orchestrates both. Ships as a single binary, zero-config, auditing a **whole project** or a **single module**. **sift itself must pass a sift audit.**
+Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (structure extraction, coarse filtering) goes to zero-cost static parsing and cheap small models; heavy logic convergence goes to a frontier model; a ReACT state machine orchestrates both. Ships as a single binary, zero-config, auditing a **whole project** or a **single module**. **sift itself must pass its internal release gates.**
 
 - Architecture
 
@@ -28,7 +28,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
         ▼
   Report    stdout Markdown risk list (line/call-chain)            [P4 started]
         ▼
-  Self-audit  sift audits sift + 10-dim scored gate               [P5/P6]
+  Internal gate  scored source checks + release evidence          [P5/P6]
 ```
 
 ## Project Profile (target state)
@@ -41,7 +41,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 - **Engineering-grade by default.** A clean-looking but incomplete audit is a defect. Any skipped input, truncation, fallback, partial model result, or invalid config must be visible and testable.
 - **Stable machine contracts.** Scan JSONL, final Markdown, diagnostics, and generated reports have separate channels. Downstream scripts must be able to consume stdout without guessing whether it contains mixed formats.
 - **Memory decoupled from scale.** Stream and drop; resident memory stays low.
-- **Self-auditable.** `sift .` must pass its own audit; modular, TDD-guarded, clear boundaries.
+- **Internally gated.** The project must pass its own maintainer-only release gates; modular, TDD-guarded, clear boundaries.
 - **Priority on conflict:** robust > usable report > cheap > fast > small.
 
 ## Non-goals (hard rules)
@@ -69,7 +69,7 @@ src/model.rs      multi-model registry/client trait/timeout    [P2✓]
 src/react.rs      ReACT state machine + skill enum/match       [P3 ✓]
 src/skills.rs     local skill fns (map filter / reduce)        [P3 ✓→P4]
 src/report.rs     Markdown risk-list renderer                  [P4]
-src/audit.rs      self-audit dimension scoring                 [P5]
+src/audit.rs      internal gate dimension scoring              [P5]
 ```
 
 ## Multi-model & concurrency (config schema)
@@ -109,7 +109,7 @@ The default user config path is `~/.sift/config.toml`; it is created on first ru
 
 ## Phased Roadmap
 
-> Each phase: feature list / boundaries / self-audit gate. All-green gate ⇒ next phase; next steps set by audit result.
+> Each phase: feature list / boundaries / internal gate. All-green gate ⇒ next phase; next steps set by gate evidence.
 
 ### P0 Scaffold — done ✓
 Features: clap fallback resolve, bounded scanner, exit on missing key, minimal wiring. Bounds: no net/parse/tree. Gate: `cargo build` green, 0 unwrap, `--scan-only` scans, missing key exit1.
@@ -126,11 +126,11 @@ Features: enum state machine, initial tool protocol prompt, large model emits `<
 ### P4 Map+Reduce+report
 Features: deterministic AST coarse ledger, Markdown renderer, real `[[model]]` TOML parsing, small-pool Map waves, explicit input coverage, and clean stdout boundaries. Bounds: module mode slices root only; truncation and degraded model paths must be visible. Gate: hits seeded risks; module/project don't bleed; full-audit stdout contains only the report; invalid config fails; fake-endpoint full audit smoke proves the user-facing path.
 
-### P5 Self-audit
-Features: audit.rs scores trimmed dimensions; `sift . --self-audit` writes report to `reports/` (gitignored). Gate: self-audit no FAIL/WARN for hard rules, including no broad dead-code allows, no Chinese source strings/comments, clean report stream boundary, and visible seed truncation.
+### P5 Internal Quality Gate
+Features: audit.rs scores trimmed dimensions and writes maintainer-only reports to `reports/` (gitignored). Gate: no FAIL/WARN for hard rules, including no broad dead-code allows, no Chinese source strings/comments, clean report stream boundary, and visible seed truncation.
 
 ### P6 Release hardening
-Features: ReleaseSafe single binary, Makefile install path, macOS Homebrew tap publishing, more grammars, stable JSON. Gate: single-file dist, self-audit PASS, docs↔code consistent, `brew install jamiesun/tap/sift` backed by release checksums.
+Features: ReleaseSafe single binary, Makefile install path, macOS Homebrew tap publishing, more grammars, stable JSON. Gate: single-file dist, internal gates pass, docs↔code consistent, `brew install jamiesun/tap/sift` backed by release checksums.
 
 ## Definition of done
 
@@ -140,6 +140,6 @@ Features: ReleaseSafe single binary, Makefile install path, macOS Homebrew tap p
 - Report declares input coverage and truncation state; incomplete coverage never looks like a complete verdict.
 - Every external call times out; failures trip to partial, never grind.
 - One binary audits project and `--module` without bleed.
-- `sift . --self-audit` self-audit no FAIL or hard-rule WARN.
+- Internal release gates have no FAIL or hard-rule WARN.
 
-> Suggestions (not rules): rayon, exact timeout/size/latency numbers per benchmark. Hard rules: single binary, fallback resolve, bounded channel, hard-timeout breaker, no unwrap, TDD, bilingual docs (EN default, ZH twin), passing self-audit.
+> Suggestions (not rules): rayon, exact timeout/size/latency numbers per benchmark. Hard rules: single binary, fallback resolve, bounded channel, hard-timeout breaker, no unwrap, TDD, bilingual docs (EN default, ZH twin), passing internal gates.

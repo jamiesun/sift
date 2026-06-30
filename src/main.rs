@@ -308,15 +308,19 @@ fn main() -> ExitCode {
             }
         }
         if partial_reports.is_empty() {
-            println!(
+            let output = format!(
                 "\n# {}\n\n{}\n\n{}\n\n{}",
                 audit_result_heading(cfg.report_language),
                 coverage.markdown_section(cfg.report_language),
                 diagnostics,
                 render_batch_reports(&final_reports, cfg.report_language)
             );
+            println!("{output}");
+            if cfg.save {
+                save_audit_result(&cfg, &output);
+            }
         } else {
-            println!(
+            let output = format!(
                 "\n# {}\n\n{}\n\n{}\n\n{}\n\n{}\n\n## {}\n\n{}",
                 incomplete_audit_heading(cfg.report_language),
                 incomplete_audit_notice(cfg.report_language),
@@ -326,10 +330,78 @@ fn main() -> ExitCode {
                 local_fallback_heading(cfg.report_language),
                 report::markdown_from_seed_with_language(&seed, cfg.report_language)
             );
+            println!("{output}");
+            if cfg.save {
+                save_audit_result(&cfg, &output);
+            }
             return ExitCode::FAILURE;
         }
     }
     ExitCode::SUCCESS
+}
+
+fn save_audit_result(cfg: &Config, markdown: &str) {
+    let dir = match &cfg.save_to {
+        Some(dir) => dir.clone(),
+        None => cfg.root.join("reports"),
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("cannot create save directory {}: {e}", dir.display());
+        return;
+    }
+    let date = utc_yyyymmdd();
+    let path = next_audit_result_path(&dir, &date);
+    match std::fs::write(&path, markdown) {
+        Ok(()) => eprintln!("audit result saved: {}", path.display()),
+        Err(e) => eprintln!("cannot write audit result {}: {e}", path.display()),
+    }
+}
+
+/// Pick the next free reports/sift-audit-result-<date>-<num>.md path.
+fn next_audit_result_path(dir: &Path, date: &str) -> PathBuf {
+    let prefix = format!("sift-audit-result-{date}-");
+    let mut max_num = 0u32;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Some(rest) = name.strip_prefix(&prefix)
+                && let Some(num) = rest.strip_suffix(".md")
+                && let Ok(n) = num.parse::<u32>()
+            {
+                max_num = max_num.max(n);
+            }
+        }
+    }
+    let num = max_num + 1;
+    dir.join(format!("sift-audit-result-{date}-{num:03}.md"))
+}
+
+/// Format the current UTC date as YYYYMMDD without external date crates.
+fn utc_yyyymmdd() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86_400) as i64;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}{month:02}{day:02}")
+}
+
+/// Convert days since the Unix epoch to a (year, month, day) civil date (UTC).
+/// Based on Howard Hinnant's civil_from_days algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m, d)
 }
 
 fn internal_gate_target() -> Option<PathBuf> {

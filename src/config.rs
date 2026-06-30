@@ -123,6 +123,14 @@ pub struct Cli {
     #[arg(long, alias = "report-lang", value_enum, default_value = "en")]
     pub report_language: ReportLanguage,
 
+    /// Save the audit result to reports/sift-audit-result-yyyymmdd-num.md
+    #[arg(long)]
+    pub save: bool,
+
+    /// Directory to save the audit result into (implies --save)
+    #[arg(long)]
+    pub save_to: Option<PathBuf>,
+
     /// Print extra diagnostic progress to stderr
     #[arg(long)]
     pub debug: bool,
@@ -265,6 +273,8 @@ pub struct Config {
     pub max_retries: u32,
     pub report_language: ReportLanguage,
     pub debug: bool,
+    pub save: bool,
+    pub save_to: Option<PathBuf>,
     models: Vec<FileModelConfig>,
     env_file: BTreeMap<String, String>,
 }
@@ -355,6 +365,8 @@ impl Config {
                 .unwrap_or(1),
             report_language: cli.report_language,
             debug: cli.debug,
+            save: cli.save || cli.save_to.is_some(),
+            save_to: cli.save_to,
             models: file.models,
             env_file,
         })
@@ -1362,6 +1374,8 @@ model = "gpt-oss"
             max_retries: 0,
             report_language: ReportLanguage::En,
             debug: false,
+            save: false,
+            save_to: None,
             models: file.models,
             env_file: BTreeMap::new(),
         };
@@ -1391,6 +1405,8 @@ model = "gpt-oss"
             benchmark_estimated_output_tokens: None,
             report_language: ReportLanguage::En,
             debug: false,
+            save: false,
+            save_to: None,
         };
         let err = Config::resolve(cli).err().map(|e| e.to_string());
         assert!(err.unwrap_or_default().contains("outside project root"));
@@ -1418,6 +1434,8 @@ model = "gpt-oss"
             benchmark_estimated_output_tokens: None,
             report_language: ReportLanguage::En,
             debug: false,
+            save: false,
+            save_to: None,
         };
         let cfg = Config::resolve(cli).unwrap_or_else(|_| Config {
             root: PathBuf::new(),
@@ -1440,6 +1458,8 @@ model = "gpt-oss"
             max_retries: 0,
             report_language: ReportLanguage::En,
             debug: false,
+            save: false,
+            save_to: None,
             models: Vec::new(),
             env_file: BTreeMap::new(),
         });
@@ -1467,6 +1487,8 @@ model = "gpt-oss"
             benchmark_estimated_output_tokens: None,
             report_language: ReportLanguage::En,
             debug: false,
+            save: false,
+            save_to: None,
         };
 
         let err = Config::resolve(cli).err().map(|e| e.to_string());
@@ -1495,6 +1517,8 @@ model = "gpt-oss"
             benchmark_estimated_output_tokens: None,
             report_language: ReportLanguage::En,
             debug: false,
+            save: false,
+            save_to: None,
         };
         let err = Config::resolve(cli).err().map(|e| e.to_string());
         assert!(err.unwrap_or_default().contains("--benchmark"));
@@ -1515,6 +1539,8 @@ model = "gpt-oss"
             benchmark_estimated_output_tokens: None,
             report_language: ReportLanguage::En,
             debug: false,
+            save: false,
+            save_to: None,
         };
         let err = Config::resolve(cli).err().map(|e| e.to_string());
         assert!(err.unwrap_or_default().contains("benchmark-input-1m-cost"));

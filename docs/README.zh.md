@@ -22,6 +22,8 @@ sift ./repo --module src        # 审子模块
 SIFT_API_KEY=<KEY> sift ./repo  # 全链路
 sift ./repo --api-key-file ~/.sift/key
 sift ./repo --report-language zh # 输出中文 Markdown 报告
+sift ./repo --save               # 同时保存报告到 reports/sift-audit-result-YYYYMMDD-NNN.md
+sift ./repo --save-to out/audits # 保存报告到指定目录（隐含 --save）
 sift ./repo --debug              # 向 stderr 打印更多诊断
 sift doctor                    # 检查配置、key_env 与 endpoint/key 错配
 ```

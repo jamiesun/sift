@@ -14,7 +14,6 @@ pub fn spawn_scan(cfg: &Config) -> Receiver<PathBuf> {
     let (tx, rx) = bounded::<PathBuf>(CHANNEL_CAP);
 
     let root = cfg.root.clone();
-    let max_bytes = cfg.max_bytes;
     let ignores = cfg.ignores.clone();
 
     thread::spawn(move || {
@@ -30,13 +29,6 @@ pub fn spawn_scan(cfg: &Config) -> Receiver<PathBuf> {
         for dent in builder.build() {
             let Ok(entry) = dent else { continue };
             if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                continue;
-            }
-            if entry
-                .metadata()
-                .map(|m| m.len() > max_bytes)
-                .unwrap_or(true)
-            {
                 continue;
             }
             if tx.send(entry.into_path()).is_err() {
@@ -69,6 +61,7 @@ mod tests {
             max_bytes: Some(128),
             scan_only: true,
             agent_gate: false,
+            format: crate::config::OutputFormat::Text,
             benchmark: false,
             benchmark_output: None,
             benchmark_input_1m_cost: None,

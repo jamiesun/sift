@@ -1,0 +1,24 @@
+# Optional project-local policy. Copy to sift-policy.toml at the repository root.
+# Policy files do not contain secrets.
+
+# Treat very large scans as incomplete until reviewed.
+max_candidate_files = 20000
+
+# Suppress known synthetic fixtures or generated samples.
+[[allowlist]]
+path = "tests/fixtures/"
+rule = "download-execute"
+reason = "synthetic regression fixture"
+
+# Escalate rules or paths that are never acceptable in this organization.
+[[denylist]]
+path = ".github/workflows/"
+rule = "workflow-write-all"
+reason = "CI tokens must use least privilege"
+
+# Tune severity without forking sift's built-in rules.
+[[severity_override]]
+path = "docs/"
+rule = "download-execute"
+severity = "medium"
+reason = "documentation examples are reviewed separately"

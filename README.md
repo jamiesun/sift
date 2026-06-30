@@ -4,7 +4,7 @@
 
 Cost-controlled open-source project auditor: **tiered funnel + compute mismatch + ReACT scheduling**. Before adopting a dependency, get a file/line-level risk ledger without force-feeding tens of thousands of lines into a frontier model.
 
-- Grunt work (structure extraction / coarse filtering) → tree-sitter + cheap small models
+- Grunt work (structure extraction / deterministic coarse filtering) → tree-sitter + local rules
 - Logic convergence → frontier large model, orchestrated by a ReACT state machine
 - Single binary, zero-config; audits a whole project or a single module; sift must pass its internal release gates
 
@@ -15,9 +15,11 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for full design.
 ```sh
 sift ./repo --scan-only        # scan layer only (no key needed)
 sift ./repo --agent-gate       # deterministic pre-run gate (no key needed)
+sift ./repo --agent-gate --format json
 sift ./repo --benchmark        # scan/model budget telemetry JSON (no key needed)
 sift github owner/repo         # safe GitHub intake, defaults to --agent-gate
 sift github owner/repo --ref main --scan-only
+sift eval-corpus               # run the checked-in repo-intake precision corpus
 sift ./repo --module src        # audit a submodule
 SIFT_API_KEY=<KEY> sift ./repo  # full pipeline
 sift ./repo --api-key-file ~/.sift/key
@@ -40,21 +42,33 @@ BLOCKERS:
 SAFE_TO_AGENT_RUN: yes | no
 ```
 
+Use `--format json` with `--agent-gate` for automation. The JSON contract
+contains `verdict`, `safe_to_agent_run`, `exit_reason`, `coverage`, `findings`,
+`blockers`, artifact inventory, truncation details, and policy actions.
+
 The command exits `0` only when `SAFE_TO_AGENT_RUN: yes`; `CAUTION`,
 `REJECT`, and `INCOMPLETE` exit non-zero so callers can stop before setup,
 install, build, or run steps.
 
 The deterministic supply-chain layer currently flags npm install lifecycle
-scripts, Rust `build.rs` command boundaries, shell/Dockerfile download-execute
-patterns, base64 decode-to-execute flows, GitHub Actions secrets coupled to
-shell blocks, and unpinned GitHub Actions.
+scripts, manifest/lockfile reproducibility gaps, git/path/http dependency
+sources, Rust `build.rs` command boundaries, shell/Dockerfile download-execute
+patterns, base64 decode-to-execute flows, GitHub Actions permission/trigger
+risk, secrets coupled to shell execution, unpinned GitHub Actions, Dockerfile
+root/remote repository patterns, and suspicious binary/archive artifacts.
 
 `sift github` accepts `owner/repo` or `https://github.com/owner/repo`, fetches a
 temporary checkout with `git`, resolves the commit SHA, then runs the local
 scan/gate/benchmark pipeline against that checkout. It never runs repository
 code, package manager commands, build scripts, hooks, install commands, or
-submodules. Temporary checkouts are removed by default; use `--keep-checkout`
-only when you need to inspect the fetched tree.
+submodules. The checkout is inspected for file/byte limits, `.gitmodules`, and
+Git LFS indicators before scanning. Temporary checkouts are removed by default;
+use `--keep-checkout` only when you need to inspect the fetched tree.
+
+Project-local policy lives in `sift-policy.toml`. It supports
+`max_candidate_files`, `[[allowlist]]`, `[[denylist]]`, and
+`[[severity_override]]` entries keyed by `path`, `rule`, `severity`, and
+`reason`; applied policy decisions are shown in text and JSON gate output.
 
 On first run, sift creates `~/.sift/config.toml` from the built-in default
 template. The default file contains only non-secret settings; put model keys in
@@ -83,8 +97,8 @@ sift ./repo --benchmark \
 The scan layer currently dehydrates Rust, Python, Go, JavaScript, TypeScript/TSX,
 HTML, CSS, Zig, Bash-compatible shell files (`.sh`, `.bash`, `.zsh`), Dart,
 Kotlin, Java, C/C++, C#, PHP, Swift, Ruby, SQL, Dockerfile/Containerfile, YAML,
-HCL/Terraform, Vue, Svelte, `package.json`, Makefile, and Markdown install
-snippets.
+HCL/Terraform, Vue, Svelte, `package.json`, common package manifests/lockfiles,
+Makefile, and Markdown install snippets.
 
 ## Install
 
@@ -107,8 +121,10 @@ intentional emergency commit, run `SIFT_SKIP_LOCAL_CI=1 git commit ...`.
 ## Test Fixtures
 
 `tests/fixtures/repo-intake/` contains synthetic malicious and benign repository
-trees used by the deterministic `--agent-gate` regression suite. The fixture
-commands are inert examples and must never be executed as install scripts.
+trees used by the deterministic `--agent-gate` regression suite. `sift
+eval-corpus` emits the release-oriented precision table over those fixtures.
+The fixture commands are inert examples and must never be executed as install
+scripts.
 
 macOS releases are published through the existing tap:
 
@@ -118,7 +134,7 @@ brew install jamiesun/tap/sift
 
 ## Status
 
-P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool protocol, compile-time skills, retry→partial) done. P4 is in progress: local AST risk ledger, Markdown renderer, `[[model]]` config parsing, and small-model Map waves are wired. Internal release gates write local reports under `reports/` for maintainers; seeded report gates and stronger scoring come next.
+P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool protocol, compile-time skills, retry→partial) done. P4 is in progress: local AST risk ledger, Markdown renderer, `[[model]]` config parsing, stable JSON gate output, policy, artifact inventory, and eval corpus are wired. Internal release gates write local reports under `reports/` for maintainers.
 
 ## Docs
 

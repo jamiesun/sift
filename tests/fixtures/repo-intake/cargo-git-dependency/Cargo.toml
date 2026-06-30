@@ -1,0 +1,7 @@
+[package]
+name = "cargo-git-dependency"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+helper = { git = "https://github.com/example/helper.git", branch = "main" }

@@ -10,6 +10,7 @@ pub enum Lang {
     Go,
     JavaScript,
     PackageJson,
+    Manifest,
     Makefile,
     Markdown,
     TypeScript,
@@ -41,6 +42,11 @@ impl Lang {
             Some("Dockerfile" | "Containerfile") => return Some(Lang::Dockerfile),
             Some("Gemfile" | "Rakefile") => return Some(Lang::Ruby),
             Some("package.json") => return Some(Lang::PackageJson),
+            Some(
+                "Cargo.toml" | "Cargo.lock" | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock"
+                | "bun.lockb" | "pyproject.toml" | "requirements.txt" | "poetry.lock" | "uv.lock"
+                | "pdm.lock",
+            ) => return Some(Lang::Manifest),
             Some("Makefile" | "makefile" | "GNUmakefile") => return Some(Lang::Makefile),
             _ => {}
         }
@@ -81,6 +87,7 @@ impl Lang {
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Lang::PackageJson => tree_sitter_javascript::LANGUAGE.into(),
+            Lang::Manifest => tree_sitter_bash::LANGUAGE.into(),
             Lang::Makefile => tree_sitter_bash::LANGUAGE.into(),
             Lang::Markdown => tree_sitter_bash::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -114,6 +121,7 @@ impl Lang {
             Lang::Go => "go",
             Lang::JavaScript => "javascript",
             Lang::PackageJson => "package-json",
+            Lang::Manifest => "manifest",
             Lang::Makefile => "makefile",
             Lang::Markdown => "markdown",
             Lang::TypeScript => "typescript",
@@ -167,6 +175,9 @@ pub fn dehydrate(path: &Path, src: &[u8]) -> Option<AstSummary> {
     let lang = Lang::from_path(path)?;
     if lang == Lang::PackageJson {
         return Some(dehydrate_package_json(path, src));
+    }
+    if lang == Lang::Manifest {
+        return Some(dehydrate_manifest(path, src));
     }
     if lang == Lang::Makefile {
         return Some(dehydrate_makefile(path, src));
@@ -331,10 +342,50 @@ fn dehydrate_package_json(path: &Path, src: &[u8]) -> AstSummary {
                 line: idx + 1,
                 text,
             });
+            continue;
+        }
+        if is_manifest_signal_line(trimmed) {
+            let text: String = trimmed.chars().take(180).collect();
+            sum.locations.push(AstLocation {
+                kind: "signature",
+                line: idx + 1,
+                text,
+            });
         }
     }
     dedup(&mut sum.signatures);
     dedup(&mut sum.calls);
+    sum
+}
+
+fn is_manifest_signal_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("git+")
+        || lower.contains("github.com/")
+        || lower.contains("\"file:")
+        || lower.contains("http://")
+        || lower.contains("https://")
+}
+
+fn dehydrate_manifest(path: &Path, src: &[u8]) -> AstSummary {
+    let mut sum = line_summary(path, Lang::Manifest);
+    let text = String::from_utf8_lossy(src);
+    for (idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let capped: String = trimmed.chars().take(180).collect();
+        sum.signatures.push(capped.clone());
+        sum.locations.push(AstLocation {
+            kind: "signature",
+            line: idx + 1,
+            text: capped,
+        });
+    }
+    dedup(&mut sum.signatures);
+    sum.locations
+        .sort_by(|a, b| (a.line, a.kind, &a.text).cmp(&(b.line, b.kind, &b.text)));
     sum
 }
 
@@ -445,6 +496,7 @@ fn is_import_node(lang: Lang, kind: &str) -> bool {
         Lang::Dockerfile => kind == "from_instruction",
         Lang::Sql
         | Lang::Makefile
+        | Lang::Manifest
         | Lang::Markdown
         | Lang::Yaml
         | Lang::Hcl
@@ -558,6 +610,7 @@ fn is_signature_node(lang: Lang, kind: &str) -> bool {
         ),
         Lang::Dockerfile => kind.ends_with("_instruction") && kind != "run_instruction",
         Lang::Makefile | Lang::Markdown => false,
+        Lang::Manifest => false,
         Lang::Yaml => matches!(
             kind,
             "block_mapping_pair" | "block_sequence_item" | "flow_pair"
@@ -614,6 +667,7 @@ fn is_call_node(lang: Lang, kind: &str) -> bool {
             "run_instruction" | "cmd_instruction" | "entrypoint_instruction" | "shell_instruction"
         ),
         Lang::Makefile
+        | Lang::Manifest
         | Lang::Markdown
         | Lang::Yaml
         | Lang::Hcl

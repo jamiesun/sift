@@ -22,8 +22,8 @@
         │  跨界引用打 [EXTERNAL_BLACKBOX]
         ▼
   模型层  多模型注册表 · 每调用硬超时 · 熔断+退避恢复    [P2 ✓]
-        ▼  ┌─ 小模型池(并发 Map 粗筛) ──┐
-  ReACT 调度器(工具协议, 技能=本地函数, retry≤N)          [P3 ✓]
+        ▼
+  ReACT 调度器(工具协议, 本地粗筛, retry≤N)              [P3 ✓]
         │  └─ 大模型(Reduce 收敛) ─────┘
         ▼
   报表层  stdout Markdown 风险清单(行号/调用链)           [P4 已启动]
@@ -34,9 +34,9 @@
 ## 项目画像（目标状态）
 
 - **零摩擦冷启动。** `sift ./repo --scan-only` 直接跑；缺 `~/.sift/config.toml` 时自动创建不含密钥的默认配置；不交互追问；缺 Key 立退给注入提示。
-- **成本可控可预算。** token 主要花在小模型；大模型只收脱水骨架。用户能预判审一个百兆库的花费。
-- **大小模型协同调度。** ReACT 状态机把粗筛(小)与收敛(大)编排成一条链，技能是编译期写死的本地函数。
-- **多模型 + 并发提速。** 可配置多个模型端点，小模型池并发跑 Map；大模型单点收敛。
+- **成本可控可预算。** 确定性 baseline 本地完成；完整审计才把脱水骨架交给大模型。
+- **模型调度。** ReACT 状态机把本地粗筛与大模型收敛编排成一条链，技能是编译期写死的本地函数。
+- **多模型 + 并发提速。** 可配置多个模型端点；扫描/模型并发保持有界且可观测。
 - **绝不无脑死磕。** 每个外部调用有硬超时；连续失败触发熔断；熔断后退避恢复或降级，到顶则输出半成品而非挂死。
 - **默认工程级。** 一份看起来完整但实际不完整的审计报告就是缺陷。跳过输入、截断、回退、半成品模型结果、无效配置都必须可见且可测试。
 - **稳定机器契约。** 扫描 JSONL、最终 Markdown、诊断信息和生成报告各走清晰通道。下游脚本消费 stdout 时不应该猜里面是否混了多种格式。
@@ -67,7 +67,7 @@ src/scanner.rs    Walk + 有界 channel                  [P0✓]
 src/extract.rs    tree-sitter 脱水 → AstSummary        [P1]
 src/model.rs      多模型注册表/客户端 trait/超时熔断    [P2✓]
 src/react.rs      ReACT 状态机 + 技能 enum/match        [P3 ✓]
-src/skills.rs     本地技能函数(map粗筛/reduce收敛)      [P3 ✓→P4]
+src/skills.rs     本地技能函数(粗筛/reduce收敛)         [P3 ✓→P4]
 src/report.rs     Markdown 风险清单渲染                 [P4]
 src/audit.rs      内部门禁维度评分(借鉴 scoot, 裁剪)    [P5]
 ```
@@ -75,7 +75,7 @@ src/audit.rs      内部门禁维度评分(借鉴 scoot, 裁剪)    [P5]
 ## 多模型与并发（config schema）
 
 ```toml
-concurrency = 8          # 小模型并发上限
+concurrency = 8          # 扫描/模型并发上限
 [[model]]                # 可多条；role 决定用途
 role = "small"           # small=粗筛池 / large=收敛
 endpoint = "..."
@@ -129,10 +129,10 @@ max_retries = 1
 ### P3 ReACT 调度器 — 已完成 ✓
 - 功能：enum 状态机，初始工具协议提示，大模型出 `<TOOL_CALL>`，经 `$SEED` match 路由本地技能；retry≤N 熔断半成品。
 - 边界：技能编译期写死；无动态加载。
-- 门禁：注入坏 JSON/未注册技能/连错 N 次能熔断；react.rs 单测覆盖。小模型池并发留 P4。
+- 门禁：注入坏 JSON/未注册技能/连错 N 次能熔断；react.rs 单测覆盖。
 
 ### P4 Map+Reduce+报表
-- 功能：确定性 AST 粗筛账本、Markdown 渲染、真实 `[[model]]` TOML 解析、小模型 Map 波次、显式输入覆盖率、干净 stdout 边界。
+- 功能：确定性 AST 粗筛账本、Markdown 渲染、真实 `[[model]]` TOML 解析、显式输入覆盖率、稳定 JSON 门禁、policy、artifact inventory、eval corpus 与干净 stdout 边界。
 - 边界：模块审计只切根；跨界不追；截断和模型降级路径必须可见。
 - 门禁：审已知样本命中预埋风险；模块/项目模式不串；完整审计 stdout 只含报告；无效配置失败；fake-endpoint full audit smoke 证明用户路径可用。
 

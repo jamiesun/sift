@@ -14,6 +14,7 @@
 
 ```sh
 sift ./repo --scan-only        # 仅扫描层
+sift ./repo --agent-gate       # 确定性预运行门禁，无需模型 Key
 sift ./repo --module src        # 审子模块
 SIFT_API_KEY=<KEY> sift ./repo  # 全链路
 sift ./repo --api-key-file ~/.sift/key
@@ -22,6 +23,22 @@ sift ./repo --debug              # 向 stderr 打印更多诊断
 sift doctor                    # 检查配置、key_env 与 endpoint/key 错配
 sift ./repo --self-audit        # 本地 P5 门禁，无需模型 Key
 ```
+
+`--agent-gate` 是给 agent 和包装脚本使用的本地确定性 repo-intake
+门禁。它只向 stdout 写入以下稳定契约：
+
+```text
+VERDICT: ACCEPT | CAUTION | REJECT | INCOMPLETE
+WHY:
+- <top evidence>
+BLOCKERS:
+- <file:line evidence or coverage blocker>
+SAFE_TO_AGENT_RUN: yes | no
+```
+
+只有 `SAFE_TO_AGENT_RUN: yes` 时命令退出码为 `0`；`CAUTION`、`REJECT`
+和 `INCOMPLETE` 都返回非零，方便调用方在 setup、install、build 或 run
+之前停止。
 
 首次运行时，sift 会自动创建 `~/.sift/config.toml` 默认配置文件。默认配置只包含非密钥项；模型密钥放在环境变量里，或通过 `--api-key-file` 传入。
 

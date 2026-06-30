@@ -39,6 +39,22 @@ pub struct RiskFinding {
     pub evidence: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AgentGateCoverage {
+    pub candidate_files: usize,
+    pub dehydrated_files: usize,
+    pub read_failed: usize,
+    pub unsupported_files: usize,
+    pub parse_failed: usize,
+    pub serialization_failed: usize,
+    pub record_truncated: usize,
+}
+
+pub struct AgentGateReport {
+    pub markdown: String,
+    pub safe_to_agent_run: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct AstRow {
     path: String,
@@ -72,6 +88,10 @@ pub fn markdown_from_findings_json_with_language(
 ) -> Option<String> {
     let findings: Vec<RiskFinding> = serde_json::from_str(input).ok()?;
     Some(render_markdown_with_language(&findings, language))
+}
+
+pub fn agent_gate_from_seed(seed: &str, coverage: AgentGateCoverage) -> AgentGateReport {
+    render_agent_gate(&findings_from_seed(seed), coverage)
 }
 
 pub fn findings_from_seed(seed: &str) -> Vec<RiskFinding> {
@@ -210,6 +230,137 @@ fn title_for_language(title: &str, language: ReportLanguage) -> &str {
     }
 }
 
+fn render_agent_gate(findings: &[RiskFinding], coverage: AgentGateCoverage) -> AgentGateReport {
+    let incomplete = gate_incomplete_reasons(coverage);
+    let verdict = if !incomplete.is_empty() {
+        "INCOMPLETE"
+    } else if findings.iter().any(|f| f.severity == Severity::High) {
+        "REJECT"
+    } else if findings.is_empty() {
+        "ACCEPT"
+    } else {
+        "CAUTION"
+    };
+    let safe_to_agent_run = verdict == "ACCEPT";
+    let mut s = format!("VERDICT: {verdict}\n");
+
+    s.push_str("WHY:\n");
+    for line in gate_why_lines(findings, &incomplete) {
+        s.push_str("- ");
+        s.push_str(&line);
+        s.push('\n');
+    }
+
+    s.push_str("BLOCKERS:\n");
+    let blockers = gate_blocker_lines(findings, &incomplete);
+    if blockers.is_empty() {
+        s.push_str("- none\n");
+    } else {
+        for line in blockers {
+            s.push_str("- ");
+            s.push_str(&line);
+            s.push('\n');
+        }
+    }
+
+    s.push_str(&format!(
+        "SAFE_TO_AGENT_RUN: {}\n\n",
+        if safe_to_agent_run { "yes" } else { "no" }
+    ));
+    s.push_str("COVERAGE:\n");
+    s.push_str(&format!(
+        "- candidate_files: {}\n- dehydrated_files: {}\n- unsupported_files: {}\n- read_failed: {}\n- parse_failed: {}\n- serialization_failed: {}\n- record_truncated: {}\n",
+        coverage.candidate_files,
+        coverage.dehydrated_files,
+        coverage.unsupported_files,
+        coverage.read_failed,
+        coverage.parse_failed,
+        coverage.serialization_failed,
+        coverage.record_truncated,
+    ));
+
+    AgentGateReport {
+        markdown: s,
+        safe_to_agent_run,
+    }
+}
+
+fn gate_incomplete_reasons(coverage: AgentGateCoverage) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if coverage.read_failed > 0 {
+        reasons.push(format!("read_failed={}", coverage.read_failed));
+    }
+    if coverage.parse_failed > 0 {
+        reasons.push(format!("parse_failed={}", coverage.parse_failed));
+    }
+    if coverage.serialization_failed > 0 {
+        reasons.push(format!(
+            "serialization_failed={}",
+            coverage.serialization_failed
+        ));
+    }
+    if coverage.record_truncated > 0 {
+        reasons.push(format!("record_truncated={}", coverage.record_truncated));
+    }
+    if coverage.candidate_files > 0 && coverage.dehydrated_files == 0 {
+        reasons.push("no_supported_files_dehydrated".to_string());
+    }
+    reasons
+}
+
+fn gate_why_lines(findings: &[RiskFinding], incomplete: &[String]) -> Vec<String> {
+    if !incomplete.is_empty() {
+        return incomplete
+            .iter()
+            .take(3)
+            .map(|reason| format!("Input coverage is incomplete: {reason}"))
+            .collect();
+    }
+    if findings.is_empty() {
+        return vec![
+            "No deterministic risks found in the analyzed input.".to_string(),
+            "This gate does not replace manual review of runtime behavior.".to_string(),
+        ];
+    }
+    findings
+        .iter()
+        .take(3)
+        .map(|finding| {
+            format!(
+                "{} {}",
+                finding.severity.label_for(ReportLanguage::En),
+                finding_summary(finding)
+            )
+        })
+        .collect()
+}
+
+fn gate_blocker_lines(findings: &[RiskFinding], incomplete: &[String]) -> Vec<String> {
+    if !incomplete.is_empty() {
+        return incomplete
+            .iter()
+            .map(|reason| format!("coverage requires review: {reason}"))
+            .collect();
+    }
+    findings
+        .iter()
+        .filter(|finding| finding.severity != Severity::Low)
+        .take(10)
+        .map(finding_summary)
+        .collect()
+}
+
+fn finding_summary(finding: &RiskFinding) -> String {
+    let location = match finding.line {
+        Some(line) => format!("{}:{line}", finding.path),
+        None => finding.path.clone(),
+    };
+    format!(
+        "{} [{}]: {} ({})",
+        location, finding.rule, finding.title, finding.evidence
+    )
+}
+
 fn push_call_risk(
     out: &mut Vec<RiskFinding>,
     seen: &mut BTreeSet<String>,
@@ -306,6 +457,53 @@ mod tests {
     fn renders_empty_report() {
         let md = render_markdown_with_language(&[], ReportLanguage::En);
         assert!(md.contains("No deterministic risks found"));
+    }
+
+    #[test]
+    fn agent_gate_accepts_empty_clean_input() {
+        let report = agent_gate_from_seed("", AgentGateCoverage::default());
+        assert!(report.safe_to_agent_run);
+        assert!(report.markdown.contains("VERDICT: ACCEPT"));
+        assert!(report.markdown.contains("SAFE_TO_AGENT_RUN: yes"));
+    }
+
+    #[test]
+    fn agent_gate_rejects_high_deterministic_findings() {
+        let seed =
+            r#"{"path":"src/a.rs","locations":[{"kind":"call","line":9,"text":"thing.unwrap"}]}"#;
+        let report = agent_gate_from_seed(
+            seed,
+            AgentGateCoverage {
+                candidate_files: 1,
+                dehydrated_files: 1,
+                ..Default::default()
+            },
+        );
+
+        assert!(!report.safe_to_agent_run);
+        assert!(report.markdown.contains("VERDICT: REJECT"));
+        assert!(report.markdown.contains("SAFE_TO_AGENT_RUN: no"));
+        assert!(report.markdown.contains("src/a.rs:9 [panic-edge]"));
+    }
+
+    #[test]
+    fn agent_gate_marks_incomplete_coverage() {
+        let report = agent_gate_from_seed(
+            "",
+            AgentGateCoverage {
+                candidate_files: 3,
+                read_failed: 1,
+                ..Default::default()
+            },
+        );
+
+        assert!(!report.safe_to_agent_run);
+        assert!(report.markdown.contains("VERDICT: INCOMPLETE"));
+        assert!(
+            report
+                .markdown
+                .contains("coverage requires review: read_failed=1")
+        );
     }
 
     #[test]

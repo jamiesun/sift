@@ -16,6 +16,8 @@
 sift ./repo --scan-only        # 仅扫描层
 sift ./repo --agent-gate       # 确定性预运行门禁，无需模型 Key
 sift ./repo --benchmark        # 扫描/模型预算 telemetry JSON，无需模型 Key
+sift github owner/repo         # 安全 GitHub intake，默认 --agent-gate
+sift github owner/repo --ref main --scan-only
 sift ./repo --module src        # 审子模块
 SIFT_API_KEY=<KEY> sift ./repo  # 全链路
 sift ./repo --api-key-file ~/.sift/key
@@ -44,6 +46,12 @@ SAFE_TO_AGENT_RUN: yes | no
 命令边界、shell/Dockerfile 下载后执行模式、base64 解码后执行流、
 GitHub Actions secrets 与 shell block 的耦合，以及未 pin 到 commit
 SHA 的 GitHub Actions。
+
+`sift github` 接受 `owner/repo` 或 `https://github.com/owner/repo`，
+用 `git` 获取临时 checkout，解析 commit SHA，然后对该 checkout 运行本地
+scan/gate/benchmark 管线。它不会运行仓库代码、包管理器命令、build
+script、hook、install 命令或 submodule。临时 checkout 默认清理；只有
+需要人工查看取回的源码树时才使用 `--keep-checkout`。
 
 首次运行时，sift 会自动创建 `~/.sift/config.toml` 默认配置文件。默认配置只包含非密钥项；模型密钥放在环境变量里，或通过 `--api-key-file` 传入。
 

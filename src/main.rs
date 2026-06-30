@@ -8,14 +8,14 @@ mod scanner;
 mod skills;
 
 use std::io::Write;
-use std::path::PathBuf;
-use std::process::ExitCode;
-use std::time::Instant;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, Output, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use serde::Serialize;
 
-use config::{Cli, Config, ReportLanguage};
+use config::{Cli, CliCommand, Config, GithubCli, ReportLanguage};
 
 fn main() -> ExitCode {
     let run_started = Instant::now();
@@ -31,7 +31,12 @@ fn main() -> ExitCode {
         return run_internal_gate(target);
     }
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    if let Some(command) = cli.command.take() {
+        return match command {
+            CliCommand::Github(github) => run_github_intake(github),
+        };
+    }
 
     let cfg = match Config::resolve(cli) {
         Ok(c) => c,
@@ -372,6 +377,374 @@ fn run_internal_gate(target: PathBuf) -> ExitCode {
             eprintln!("internal gate failed: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+struct GithubSource {
+    repo: String,
+    url: String,
+    requested_ref: String,
+    resolved_commit: String,
+    checkout_path: PathBuf,
+    cleanup: &'static str,
+}
+
+struct GithubRepo {
+    owner: String,
+    repo: String,
+    url: String,
+}
+
+fn run_github_intake(github: GithubCli) -> ExitCode {
+    let repo = match parse_github_repo(&github.repo) {
+        Ok(repo) => repo,
+        Err(e) => {
+            eprintln!("github intake error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let requested_ref = github
+        .ref_name
+        .clone()
+        .unwrap_or_else(|| "HEAD".to_string());
+    if !valid_git_ref_arg(&requested_ref) {
+        eprintln!("github intake error: invalid --ref value");
+        return ExitCode::FAILURE;
+    }
+    let modes = [github.scan_only, github.agent_gate, github.benchmark]
+        .iter()
+        .filter(|enabled| **enabled)
+        .count();
+    if modes > 1 {
+        eprintln!(
+            "github intake error: --scan-only, --agent-gate, and --benchmark cannot be combined"
+        );
+        return ExitCode::FAILURE;
+    }
+
+    let temp_root = temp_checkout_root(&repo.owner, &repo.repo);
+    let checkout = temp_root.join("repo");
+    if let Err(e) = std::fs::create_dir_all(&checkout) {
+        eprintln!(
+            "github intake error: cannot create temporary checkout {}: {e}",
+            checkout.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    eprintln!("github source: {}", repo.url);
+    eprintln!("github requested_ref: {requested_ref}");
+    eprintln!("github checkout: {}", checkout.display());
+    eprintln!(
+        "github safety: no build, no install, no repository commands executed (no_build={} no_install={})",
+        github.no_build, github.no_install
+    );
+
+    let fetch_result = fetch_github_repo(&repo.url, &checkout, &requested_ref);
+    let resolved_commit = match fetch_result {
+        Ok(commit) => commit,
+        Err(e) => {
+            eprintln!("github intake error: {e}");
+            cleanup_checkout(&temp_root, github.keep_checkout);
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!("github resolved_commit: {resolved_commit}");
+
+    let source = GithubSource {
+        repo: format!("{}/{}", repo.owner, repo.repo),
+        url: repo.url,
+        requested_ref,
+        resolved_commit,
+        checkout_path: checkout.clone(),
+        cleanup: if github.keep_checkout {
+            "preserved"
+        } else {
+            "removed"
+        },
+    };
+    let output = match run_local_sift_for_github(&github, &checkout) {
+        Ok(output) => output,
+        Err(e) => {
+            eprintln!("github intake error: {e}");
+            cleanup_checkout(&temp_root, github.keep_checkout);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !output.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if github.benchmark {
+        match benchmark_with_github_source(&stdout, &source) {
+            Ok(json) => {
+                if let Some(path) = &github.benchmark_output {
+                    if let Err(e) = std::fs::write(path, format!("{json}\n")) {
+                        eprintln!("benchmark output failed: {}: {e}", path.display());
+                        cleanup_checkout(&temp_root, github.keep_checkout);
+                        return ExitCode::FAILURE;
+                    }
+                    eprintln!("benchmark report: {}", path.display());
+                } else {
+                    println!("{json}");
+                }
+            }
+            Err(e) => {
+                eprintln!("github intake error: cannot annotate benchmark JSON: {e}");
+                print!("{stdout}");
+            }
+        }
+    } else {
+        print!("{stdout}");
+        if !github.scan_only {
+            print!("{}", github_source_block(&source));
+        }
+    }
+
+    cleanup_checkout(&temp_root, github.keep_checkout);
+    exit_code_from_output(&output)
+}
+
+fn parse_github_repo(input: &str) -> Result<GithubRepo, String> {
+    if input.contains('@') {
+        return Err("authenticated GitHub URLs are not accepted; pass a public owner/repo or HTTPS URL without credentials".to_string());
+    }
+    let trimmed = input.trim();
+    let path = if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        rest
+    } else if trimmed.contains("://") {
+        return Err("only https://github.com/owner/repo or owner/repo are supported".to_string());
+    } else {
+        trimmed
+    };
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    if path.contains('?') || path.contains('#') {
+        return Err("GitHub URLs with query strings or fragments are not supported".to_string());
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() != 2 || !valid_github_segment(parts[0]) || !valid_github_segment(parts[1]) {
+        return Err("expected GitHub repository as owner/repo".to_string());
+    }
+    Ok(GithubRepo {
+        owner: parts[0].to_string(),
+        repo: parts[1].to_string(),
+        url: format!("https://github.com/{}/{}.git", parts[0], parts[1]),
+    })
+}
+
+fn valid_github_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+fn valid_git_ref_arg(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && !value.chars().any(|c| c.is_control() || c.is_whitespace())
+        && !value
+            .chars()
+            .any(|c| matches!(c, ':' | '\\' | '~' | '^' | '?' | '*' | '['))
+        && !value.contains("..")
+        && !value.contains("@{")
+        && !value.ends_with(".lock")
+}
+
+fn temp_checkout_root(owner: &str, repo: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "sift-github-{owner}-{repo}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+fn fetch_github_repo(url: &str, checkout: &Path, requested_ref: &str) -> Result<String, String> {
+    run_git(&["init", "--quiet", path_arg(checkout).as_str()])?;
+    run_git(&[
+        "-C",
+        path_arg(checkout).as_str(),
+        "config",
+        "core.hooksPath",
+        "/dev/null",
+    ])?;
+    run_git(&[
+        "-C",
+        path_arg(checkout).as_str(),
+        "remote",
+        "add",
+        "origin",
+        url,
+    ])?;
+    run_git(&[
+        "-C",
+        path_arg(checkout).as_str(),
+        "fetch",
+        "--quiet",
+        "--depth",
+        "1",
+        "--no-tags",
+        "origin",
+        requested_ref,
+    ])?;
+    run_git(&[
+        "-C",
+        path_arg(checkout).as_str(),
+        "-c",
+        "advice.detachedHead=false",
+        "checkout",
+        "--quiet",
+        "--detach",
+        "FETCH_HEAD",
+    ])?;
+    let output = run_git(&["-C", path_arg(checkout).as_str(), "rev-parse", "HEAD"])?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn path_arg(path: &Path) -> String {
+    path.display().to_string()
+}
+
+fn run_git(args: &[&str]) -> Result<Output, String> {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    let output = run_command_with_timeout(command, Duration::from_secs(120))?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(format!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn run_local_sift_for_github(github: &GithubCli, checkout: &Path) -> Result<Output, String> {
+    let exe =
+        std::env::current_exe().map_err(|e| format!("cannot locate current executable: {e}"))?;
+    let mut args = vec![path_arg(checkout)];
+    if let Some(module) = &github.module {
+        args.push("--module".to_string());
+        args.push(path_arg(module));
+    }
+    if github.scan_only {
+        args.push("--scan-only".to_string());
+    } else if github.benchmark {
+        args.push("--benchmark".to_string());
+    } else {
+        args.push("--agent-gate".to_string());
+    }
+    if let Some(value) = github.benchmark_input_1m_cost {
+        args.push("--benchmark-input-1m-cost".to_string());
+        args.push(value.to_string());
+    }
+    if let Some(value) = github.benchmark_output_1m_cost {
+        args.push("--benchmark-output-1m-cost".to_string());
+        args.push(value.to_string());
+    }
+    if let Some(value) = github.benchmark_estimated_output_tokens {
+        args.push("--benchmark-estimated-output-tokens".to_string());
+        args.push(value.to_string());
+    }
+    args.push("--report-language".to_string());
+    args.push(github.report_language.code().to_string());
+    if github.debug {
+        args.push("--debug".to_string());
+    }
+
+    let mut command = Command::new(exe);
+    command.args(args).env_remove("SIFT_INTERNAL_GATE");
+    run_command_with_timeout(command, Duration::from_secs(600))
+}
+
+fn run_command_with_timeout(mut command: Command, timeout: Duration) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("cannot spawn command: {e}"))?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| format!("cannot collect command output: {e}"));
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("command timed out after {}s", timeout.as_secs()));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("cannot poll command: {e}"));
+            }
+        }
+    }
+}
+
+fn benchmark_with_github_source(stdout: &str, source: &GithubSource) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("invalid JSON: {e}"))?;
+    let Some(obj) = value.as_object_mut() else {
+        return Err("benchmark output root is not an object".to_string());
+    };
+    obj.insert(
+        "github_source".to_string(),
+        serde_json::json!({
+            "repo": source.repo,
+            "url": source.url,
+            "requested_ref": source.requested_ref,
+            "resolved_commit": source.resolved_commit,
+            "checkout_path": source.checkout_path.display().to_string(),
+            "cleanup": source.cleanup,
+        }),
+    );
+    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
+fn github_source_block(source: &GithubSource) -> String {
+    format!(
+        "\nSOURCE:\n- github_repo: {}\n- github_url: {}\n- requested_ref: {}\n- resolved_commit: {}\n- checkout_path: {}\n- cleanup: {}\n",
+        source.repo,
+        source.url,
+        source.requested_ref,
+        source.resolved_commit,
+        source.checkout_path.display(),
+        source.cleanup
+    )
+}
+
+fn cleanup_checkout(temp_root: &PathBuf, keep: bool) {
+    if keep {
+        eprintln!("github checkout preserved: {}", temp_root.display());
+        return;
+    }
+    match std::fs::remove_dir_all(temp_root) {
+        Ok(()) => eprintln!("github checkout removed: {}", temp_root.display()),
+        Err(e) => eprintln!(
+            "github checkout cleanup failed: {}: {e}",
+            temp_root.display()
+        ),
+    }
+}
+
+fn exit_code_from_output(output: &Output) -> ExitCode {
+    match output.status.code() {
+        Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        None => ExitCode::FAILURE,
     }
 }
 
@@ -1172,5 +1545,52 @@ mod tests {
 
         let section = coverage.markdown_section(ReportLanguage::Zh);
         assert!(section.contains("\u{8f93}\u{5165}\u{8986}\u{76d6}"));
+    }
+
+    #[test]
+    fn github_repo_parser_accepts_owner_repo_and_https() {
+        let parsed = parse_github_repo("jamiesun/sift");
+        assert!(parsed.is_ok());
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
+            Err(_) => return,
+        };
+        assert_eq!(parsed.url, "https://github.com/jamiesun/sift.git");
+
+        let parsed = parse_github_repo("https://github.com/jamiesun/sift.git");
+        assert!(parsed.is_ok());
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
+            Err(_) => return,
+        };
+        assert_eq!(parsed.owner, "jamiesun");
+        assert_eq!(parsed.repo, "sift");
+
+        let parsed = parse_github_repo("https://github.com/jamiesun/sift.git/");
+        assert!(parsed.is_ok());
+        let parsed = match parsed {
+            Ok(parsed) => parsed,
+            Err(_) => return,
+        };
+        assert_eq!(parsed.url, "https://github.com/jamiesun/sift.git");
+    }
+
+    #[test]
+    fn github_repo_parser_rejects_unsupported_or_authenticated_urls() {
+        assert!(parse_github_repo("https://example.com/jamiesun/sift").is_err());
+        assert!(parse_github_repo("https://token@github.com/jamiesun/sift").is_err());
+        assert!(parse_github_repo("too/many/segments").is_err());
+    }
+
+    #[test]
+    fn git_ref_arg_rejects_option_like_or_spaced_refs() {
+        assert!(valid_git_ref_arg("main"));
+        assert!(valid_git_ref_arg("feature/github-intake"));
+        assert!(valid_git_ref_arg("0123456789abcdef"));
+        assert!(!valid_git_ref_arg("--upload-pack=sh"));
+        assert!(!valid_git_ref_arg("main branch"));
+        assert!(!valid_git_ref_arg("main:refs/heads/side"));
+        assert!(!valid_git_ref_arg("main..side"));
+        assert!(!valid_git_ref_arg("main@{1}"));
     }
 }

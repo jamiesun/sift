@@ -61,6 +61,7 @@ mod tests {
         assert!(std::fs::write(root.join("a.rs"), "fn a() {}").is_ok());
         assert!(std::fs::write(ignored.join("b.rs"), "fn b() {}").is_ok());
         let cli = Cli {
+            command: None,
             target: root.clone(),
             module: None,
             api_key_file: None,

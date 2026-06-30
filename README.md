@@ -16,6 +16,8 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for full design.
 sift ./repo --scan-only        # scan layer only (no key needed)
 sift ./repo --agent-gate       # deterministic pre-run gate (no key needed)
 sift ./repo --benchmark        # scan/model budget telemetry JSON (no key needed)
+sift github owner/repo         # safe GitHub intake, defaults to --agent-gate
+sift github owner/repo --ref main --scan-only
 sift ./repo --module src        # audit a submodule
 SIFT_API_KEY=<KEY> sift ./repo  # full pipeline
 sift ./repo --api-key-file ~/.sift/key
@@ -44,6 +46,13 @@ The deterministic supply-chain layer currently flags npm install lifecycle
 scripts, Rust `build.rs` command boundaries, shell/Dockerfile download-execute
 patterns, base64 decode-to-execute flows, GitHub Actions secrets coupled to
 shell blocks, and unpinned GitHub Actions.
+
+`sift github` accepts `owner/repo` or `https://github.com/owner/repo`, fetches a
+temporary checkout with `git`, resolves the commit SHA, then runs the local
+scan/gate/benchmark pipeline against that checkout. It never runs repository
+code, package manager commands, build scripts, hooks, install commands, or
+submodules. Temporary checkouts are removed by default; use `--keep-checkout`
+only when you need to inspect the fetched tree.
 
 On first run, sift creates `~/.sift/config.toml` from the built-in default
 template. The default file contains only non-secret settings; put model keys in

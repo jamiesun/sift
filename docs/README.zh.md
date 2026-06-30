@@ -40,6 +40,11 @@ SAFE_TO_AGENT_RUN: yes | no
 和 `INCOMPLETE` 都返回非零，方便调用方在 setup、install、build 或 run
 之前停止。
 
+确定性供应链规则目前会标记 npm 安装生命周期脚本、Rust `build.rs`
+命令边界、shell/Dockerfile 下载后执行模式、base64 解码后执行流、
+GitHub Actions secrets 与 shell block 的耦合，以及未 pin 到 commit
+SHA 的 GitHub Actions。
+
 首次运行时，sift 会自动创建 `~/.sift/config.toml` 默认配置文件。默认配置只包含非密钥项；模型密钥放在环境变量里，或通过 `--api-key-file` 传入。
 
 完整审计的 stdout 只保留最终 Markdown 报告；进度、状态和 debug 诊断都走 stderr，长任务不会看起来像卡死，也不影响下游工具安全消费 stdout。

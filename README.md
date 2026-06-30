@@ -40,6 +40,11 @@ The command exits `0` only when `SAFE_TO_AGENT_RUN: yes`; `CAUTION`,
 `REJECT`, and `INCOMPLETE` exit non-zero so callers can stop before setup,
 install, build, or run steps.
 
+The deterministic supply-chain layer currently flags npm install lifecycle
+scripts, Rust `build.rs` command boundaries, shell/Dockerfile download-execute
+patterns, base64 decode-to-execute flows, GitHub Actions secrets coupled to
+shell blocks, and unpinned GitHub Actions.
+
 On first run, sift creates `~/.sift/config.toml` from the built-in default
 template. The default file contains only non-secret settings; put model keys in
 environment variables or pass `--api-key-file`.

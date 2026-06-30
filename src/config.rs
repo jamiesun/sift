@@ -99,6 +99,10 @@ pub struct Cli {
     #[arg(long)]
     pub agent_gate: bool,
 
+    /// Output format for --agent-gate
+    #[arg(long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
+
     /// Run scan/dehydrate benchmark telemetry and do not call models
     #[arg(long)]
     pub benchmark: bool,
@@ -140,6 +144,8 @@ pub struct Cli {
 pub enum CliCommand {
     /// Safely inspect a GitHub repository before local setup or agent execution
     Github(GithubCli),
+    /// Run the checked-in repo-intake evaluation corpus
+    EvalCorpus(EvalCorpusCli),
 }
 
 #[derive(Debug, Args)]
@@ -175,6 +181,18 @@ pub struct GithubCli {
     #[arg(long)]
     pub agent_gate: bool,
 
+    /// Output format for --agent-gate
+    #[arg(long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
+
+    /// Maximum files allowed in the fetched checkout before scanning
+    #[arg(long, default_value_t = 20_000)]
+    pub max_checkout_files: usize,
+
+    /// Maximum bytes allowed in the fetched checkout before scanning
+    #[arg(long, default_value_t = 250 * 1024 * 1024)]
+    pub max_checkout_bytes: u64,
+
     /// Run scan/dehydrate benchmark telemetry and do not call models
     #[arg(long)]
     pub benchmark: bool,
@@ -204,10 +222,23 @@ pub struct GithubCli {
     pub debug: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct EvalCorpusCli {
+    /// Fixture corpus root; defaults to tests/fixtures/repo-intake
+    #[arg(long)]
+    pub fixtures: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ReportLanguage {
     En,
     Zh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    Text,
+    Json,
 }
 
 impl ReportLanguage {
@@ -260,6 +291,7 @@ pub struct Config {
     pub ignores: Vec<String>,
     pub scan_only: bool,
     pub agent_gate: bool,
+    pub format: OutputFormat,
     pub benchmark: bool,
     pub benchmark_output: Option<PathBuf>,
     pub benchmark_input_1m_cost: Option<f64>,
@@ -275,8 +307,32 @@ pub struct Config {
     pub debug: bool,
     pub save: bool,
     pub save_to: Option<PathBuf>,
+    pub policy: Policy,
     models: Vec<FileModelConfig>,
     env_file: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Policy {
+    pub max_candidate_files: Option<usize>,
+    pub allowlist: Vec<PolicyMatcher>,
+    pub denylist: Vec<PolicyMatcher>,
+    pub severity_overrides: Vec<PolicySeverityOverride>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PolicyMatcher {
+    pub path: Option<String>,
+    pub rule: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PolicySeverityOverride {
+    pub path: Option<String>,
+    pub rule: Option<String>,
+    pub severity: String,
+    pub reason: Option<String>,
 }
 
 impl Config {
@@ -339,6 +395,7 @@ impl Config {
             ignores,
             scan_only: cli.scan_only,
             agent_gate: cli.agent_gate,
+            format: cli.format,
             benchmark: cli.benchmark,
             benchmark_output: cli.benchmark_output,
             benchmark_input_1m_cost: cli.benchmark_input_1m_cost,
@@ -367,6 +424,7 @@ impl Config {
             debug: cli.debug,
             save: cli.save || cli.save_to.is_some(),
             save_to: cli.save_to,
+            policy: load_policy_config(&project_root.join("sift-policy.toml"))?,
             models: file.models,
             env_file,
         })
@@ -876,6 +934,91 @@ fn load_env_file(path: &Path) -> Result<BTreeMap<String, String>> {
     parse_env_file(&src).with_context(|| format!("invalid env file {}", path.display()))
 }
 
+fn load_policy_config(path: &Path) -> Result<Policy> {
+    let src = match std::fs::read_to_string(path) {
+        Ok(src) => src,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Policy::default()),
+        Err(e) => return Err(anyhow!("cannot read policy file {}: {e}", path.display())),
+    };
+    parse_policy_config(&src).with_context(|| format!("invalid policy file {}", path.display()))
+}
+
+fn parse_policy_config(src: &str) -> Result<Policy> {
+    let parsed: toml::Value = toml::from_str(src).context("parse TOML")?;
+    let table = parsed
+        .as_table()
+        .ok_or_else(|| anyhow!("policy root must be a TOML table"))?;
+    let mut policy = Policy {
+        max_candidate_files: optional_usize(table, "max_candidate_files")?,
+        ..Policy::default()
+    };
+    policy.allowlist = optional_policy_matchers(table, "allowlist")?;
+    policy.denylist = optional_policy_matchers(table, "denylist")?;
+    policy.severity_overrides = optional_policy_severity_overrides(table, "severity_override")?;
+    Ok(policy)
+}
+
+fn optional_policy_matchers(table: &toml::Table, key: &str) -> Result<Vec<PolicyMatcher>> {
+    let Some(value) = table.get(key) else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| anyhow!("policy key {key} must be an array of tables"))?;
+    let mut out = Vec::new();
+    for item in values {
+        let t = item
+            .as_table()
+            .ok_or_else(|| anyhow!("policy key {key} entries must be tables"))?;
+        let matcher = PolicyMatcher {
+            path: optional_string(t, "path")?,
+            rule: optional_string(t, "rule")?,
+            reason: optional_string(t, "reason")?,
+        };
+        if matcher.path.is_none() && matcher.rule.is_none() {
+            return Err(anyhow!("policy key {key} entries require path or rule"));
+        }
+        out.push(matcher);
+    }
+    Ok(out)
+}
+
+fn optional_policy_severity_overrides(
+    table: &toml::Table,
+    key: &str,
+) -> Result<Vec<PolicySeverityOverride>> {
+    let Some(value) = table.get(key) else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| anyhow!("policy key {key} must be an array of tables"))?;
+    let mut out = Vec::new();
+    for item in values {
+        let t = item
+            .as_table()
+            .ok_or_else(|| anyhow!("policy key {key} entries must be tables"))?;
+        let severity = optional_string(t, "severity")?
+            .ok_or_else(|| anyhow!("policy key {key} entries require severity"))?;
+        if !matches!(severity.as_str(), "high" | "medium" | "low") {
+            return Err(anyhow!(
+                "policy key {key}.severity must be high, medium, or low"
+            ));
+        }
+        let matcher = PolicySeverityOverride {
+            path: optional_string(t, "path")?,
+            rule: optional_string(t, "rule")?,
+            severity,
+            reason: optional_string(t, "reason")?,
+        };
+        if matcher.path.is_none() && matcher.rule.is_none() {
+            return Err(anyhow!("policy key {key} entries require path or rule"));
+        }
+        out.push(matcher);
+    }
+    Ok(out)
+}
+
 fn parse_env_file(src: &str) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for (idx, raw) in src.lines().enumerate() {
@@ -1361,6 +1504,7 @@ model = "gpt-oss"
             ignores: Vec::new(),
             scan_only: false,
             agent_gate: false,
+            format: OutputFormat::Text,
             benchmark: false,
             benchmark_output: None,
             benchmark_input_1m_cost: None,
@@ -1376,6 +1520,7 @@ model = "gpt-oss"
             debug: false,
             save: false,
             save_to: None,
+            policy: Policy::default(),
             models: file.models,
             env_file: BTreeMap::new(),
         };
@@ -1398,6 +1543,7 @@ model = "gpt-oss"
             max_bytes: None,
             scan_only: true,
             agent_gate: false,
+            format: OutputFormat::Text,
             benchmark: false,
             benchmark_output: None,
             benchmark_input_1m_cost: None,
@@ -1427,6 +1573,7 @@ model = "gpt-oss"
             max_bytes: None,
             scan_only: true,
             agent_gate: false,
+            format: OutputFormat::Text,
             benchmark: false,
             benchmark_output: None,
             benchmark_input_1m_cost: None,
@@ -1445,6 +1592,7 @@ model = "gpt-oss"
             ignores: Vec::new(),
             scan_only: true,
             agent_gate: false,
+            format: OutputFormat::Text,
             benchmark: false,
             benchmark_output: None,
             benchmark_input_1m_cost: None,
@@ -1460,6 +1608,7 @@ model = "gpt-oss"
             debug: false,
             save: false,
             save_to: None,
+            policy: Policy::default(),
             models: Vec::new(),
             env_file: BTreeMap::new(),
         });
@@ -1480,6 +1629,7 @@ model = "gpt-oss"
             max_bytes: None,
             scan_only: true,
             agent_gate: true,
+            format: OutputFormat::Text,
             benchmark: false,
             benchmark_output: None,
             benchmark_input_1m_cost: None,
@@ -1510,6 +1660,7 @@ model = "gpt-oss"
             max_bytes: None,
             scan_only: true,
             agent_gate: false,
+            format: OutputFormat::Text,
             benchmark: true,
             benchmark_output: None,
             benchmark_input_1m_cost: None,
@@ -1532,6 +1683,7 @@ model = "gpt-oss"
             max_bytes: None,
             scan_only: false,
             agent_gate: false,
+            format: OutputFormat::Text,
             benchmark: true,
             benchmark_output: None,
             benchmark_input_1m_cost: Some(-0.1),
@@ -1586,5 +1738,32 @@ SIFT_MAX_RETRIES=2 # retry once after first attempt
     fn rejects_dirty_env_lines() {
         assert!(parse_env_file("bad line\n").is_err());
         assert!(parse_env_file("1BAD=x\n").is_err());
+    }
+
+    #[test]
+    fn parses_policy_schema_and_rejects_bad_severity() {
+        let policy = parse_policy_config(
+            r#"
+max_candidate_files = 10
+
+[[allowlist]]
+path = "tests/fixtures"
+rule = "download-execute"
+reason = "synthetic"
+
+[[severity_override]]
+rule = "unpinned-github-action"
+severity = "low"
+"#,
+        )
+        .unwrap_or_default();
+        assert_eq!(policy.max_candidate_files, Some(10));
+        assert_eq!(policy.allowlist.len(), 1);
+        assert_eq!(policy.severity_overrides[0].severity, "low");
+
+        assert!(
+            parse_policy_config("[[severity_override]]\nrule=\"x\"\nseverity=\"urgent\"\n")
+                .is_err()
+        );
     }
 }

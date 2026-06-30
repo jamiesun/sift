@@ -7,6 +7,7 @@ mod report;
 mod scanner;
 mod skills;
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output, Stdio};
@@ -15,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use serde::Serialize;
 
-use config::{Cli, CliCommand, Config, GithubCli, ReportLanguage};
+use config::{Cli, CliCommand, Config, EvalCorpusCli, GithubCli, OutputFormat, ReportLanguage};
 
 fn main() -> ExitCode {
     let run_started = Instant::now();
@@ -35,6 +36,7 @@ fn main() -> ExitCode {
     if let Some(command) = cli.command.take() {
         return match command {
             CliCommand::Github(github) => run_github_intake(github),
+            CliCommand::EvalCorpus(eval) => run_eval_corpus(eval),
         };
     }
 
@@ -104,10 +106,30 @@ fn main() -> ExitCode {
     let mut seed_records = Vec::new();
     let mut seed_candidate_bytes = 0usize;
     let mut seed_record_truncated = 0usize;
+    let mut truncated_records = Vec::new();
+    let mut suspicious_artifacts = Vec::new();
     const SEED_CAP: usize = 64 * 1024;
     let mut out = std::io::stdout().lock();
     for path in rx {
         scan.candidate_files += 1;
+        let rel_path = audit_relative_path(&path, &cfg.root).display().to_string();
+        let meta = match std::fs::metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => {
+                scan.read_failed += 1;
+                log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
+                continue;
+            }
+        };
+        if meta.len() > cfg.max_bytes {
+            scan.unsupported_files += 1;
+            if let Some(artifact) = inspect_suspicious_artifact(&rel_path, meta.len(), &meta, true)
+            {
+                suspicious_artifacts.push(artifact);
+            }
+            log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
+            continue;
+        }
         let Ok(src) = std::fs::read(&path) else {
             scan.read_failed += 1;
             log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
@@ -115,6 +137,10 @@ fn main() -> ExitCode {
         };
         if extract::Lang::from_path(&path).is_none() {
             scan.unsupported_files += 1;
+            if let Some(artifact) = inspect_suspicious_artifact(&rel_path, meta.len(), &meta, false)
+            {
+                suspicious_artifacts.push(artifact);
+            }
             log_scan_progress(&scan, dehydrated, scan_started, cfg.debug);
             continue;
         }
@@ -136,6 +162,12 @@ fn main() -> ExitCode {
                         Some(record) => {
                             if record.truncated {
                                 seed_record_truncated = seed_record_truncated.saturating_add(1);
+                                truncated_records.push(report::TruncatedRecord {
+                                    path: record.path,
+                                    original_bytes: record.original_bytes,
+                                    compacted_bytes: record.json.len(),
+                                    reason: record.reason,
+                                });
                             }
                             seed_records.push(record.json);
                         }
@@ -168,7 +200,7 @@ fn main() -> ExitCode {
     if reg.is_some() {
         eprintln!("preparing model seed");
     }
-    let small_model_chunks_total = seed_batches(&seed_records, 16 * 1024).len();
+    let small_model_chunks_total = 0usize;
     let seed_batches = seed_batches(&seed_records, SEED_CAP);
     let seed = seed_records.join("\n");
     let seed_bytes = seed_batches
@@ -183,6 +215,8 @@ fn main() -> ExitCode {
         candidate_seed_bytes: seed_candidate_bytes,
         seed_cap: SEED_CAP,
         record_truncated: seed_record_truncated,
+        truncated_records,
+        suspicious_artifacts,
         batches: seed_batches.len(),
     };
     if needs_seed {
@@ -233,8 +267,15 @@ fn main() -> ExitCode {
     }
 
     if cfg.agent_gate {
-        let gate = report::agent_gate_from_seed(&seed, coverage.agent_gate_coverage());
-        println!("{}", gate.markdown);
+        let gate = report::agent_gate_from_seed_with_policy(
+            &seed,
+            coverage.agent_gate_coverage(),
+            &cfg.policy,
+        );
+        match cfg.format {
+            OutputFormat::Text => println!("{}", gate.markdown),
+            OutputFormat::Json => println!("{}", gate.json),
+        }
         return if gate.safe_to_agent_run {
             ExitCode::SUCCESS
         } else {
@@ -243,30 +284,10 @@ fn main() -> ExitCode {
     }
 
     if reg.is_some() {
-        eprintln!("small-model Map started");
+        eprintln!("small-model Map skipped: reduce now converges from deterministic findings");
     }
-    let map_report = reg
-        .as_mut()
-        .map(|r| r.map_small_pool(&seed, cfg.concurrency));
-    let observations = map_report
-        .as_ref()
-        .map(|report| report.observations.as_str())
-        .unwrap_or("");
-    let react_batches =
-        build_react_batches(&coverage, observations, &seed_batches, cfg.report_language);
-    if let Some(report) = &map_report {
-        eprintln!(
-            "small-model Map complete, chunks_total: {}  succeeded: {}  failed: {}  attempts: {}  retries: {}  skipped_no_model: {}  observation_bytes: {}",
-            report.chunks_total,
-            report.chunks_succeeded,
-            report.chunks_failed,
-            report.attempts_total,
-            report.retry_attempts,
-            report.skipped_no_model,
-            report.observations.len()
-        );
-    }
-    let diagnostics = diagnostics_section(&coverage, map_report.as_ref(), cfg.report_language);
+    let react_batches = build_react_batches(&coverage, &seed_batches, cfg.report_language);
+    let diagnostics = diagnostics_section(&coverage, None, cfg.report_language);
 
     // Drive ReACT only when a large model is configured.
     if let Some(large) = reg.as_mut().and_then(|r| r.large.as_mut()) {
@@ -459,11 +480,271 @@ fn run_internal_gate(target: PathBuf) -> ExitCode {
     }
 }
 
+fn run_eval_corpus(eval: EvalCorpusCli) -> ExitCode {
+    let fixtures = eval.fixtures.unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/repo-intake")
+    });
+    let cases = eval_cases();
+    let mut rows = Vec::new();
+    let mut failed = false;
+    for case in cases {
+        let fixture = fixtures.join(case.name);
+        let started = Instant::now();
+        let output =
+            Command::new(std::env::current_exe().unwrap_or_else(|_| PathBuf::from("sift")))
+                .arg(&fixture)
+                .arg("--agent-gate")
+                .arg("--format")
+                .arg("json")
+                .env_remove("SIFT_INTERNAL_GATE")
+                .env_remove("SIFT_API_KEY")
+                .env_remove("SIFT_SMALL_KEY")
+                .output();
+        let elapsed = elapsed_ms(started);
+        let Ok(output) = output else {
+            failed = true;
+            rows.push(EvalRow::spawn_failed(case, elapsed));
+            continue;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_default();
+        let actual_verdict = parsed
+            .get("verdict")
+            .and_then(|v| v.as_str())
+            .unwrap_or("INVALID_JSON")
+            .to_string();
+        let actual_rules = eval_actual_rules(&parsed);
+        let expected_rules: BTreeSet<String> =
+            case.rules.iter().map(|rule| (*rule).to_string()).collect();
+        let false_negative_rules = expected_rules
+            .difference(&actual_rules)
+            .cloned()
+            .collect::<Vec<_>>();
+        let false_positive_rules = actual_rules
+            .difference(&expected_rules)
+            .cloned()
+            .collect::<Vec<_>>();
+        let pass = actual_verdict == case.verdict && false_negative_rules.is_empty();
+        if !pass {
+            failed = true;
+        }
+        rows.push(EvalRow {
+            fixture: case.name.to_string(),
+            expected_verdict: case.verdict.to_string(),
+            actual_verdict,
+            expected_rules: expected_rules.into_iter().collect(),
+            actual_rules: actual_rules.into_iter().collect(),
+            false_negative_rules,
+            false_positive_rules,
+            scan_time_ms: elapsed,
+            seed_bytes: parsed
+                .pointer("/coverage/seed_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            estimated_tokens: parsed
+                .pointer("/coverage/seed_bytes")
+                .and_then(|v| v.as_u64())
+                .map(|bytes| bytes.saturating_add(3) / 4)
+                .unwrap_or(0),
+            pass,
+        });
+    }
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "fixture_count": rows.len(),
+        "passed": rows.iter().filter(|row| row.pass).count(),
+        "failed": rows.iter().filter(|row| !row.pass).count(),
+        "rows": rows,
+    });
+    match serde_json::to_string_pretty(&report) {
+        Ok(json) => println!("{json}"),
+        Err(e) => {
+            eprintln!("eval-corpus serialization failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EvalCase {
+    name: &'static str,
+    verdict: &'static str,
+    rules: &'static [&'static str],
+}
+
+#[derive(Serialize)]
+struct EvalRow {
+    fixture: String,
+    expected_verdict: String,
+    actual_verdict: String,
+    expected_rules: Vec<String>,
+    actual_rules: Vec<String>,
+    false_negative_rules: Vec<String>,
+    false_positive_rules: Vec<String>,
+    scan_time_ms: u128,
+    seed_bytes: u64,
+    estimated_tokens: u64,
+    pass: bool,
+}
+
+impl EvalRow {
+    fn spawn_failed(case: EvalCase, elapsed: u128) -> Self {
+        Self {
+            fixture: case.name.to_string(),
+            expected_verdict: case.verdict.to_string(),
+            actual_verdict: "SPAWN_FAILED".to_string(),
+            expected_rules: case.rules.iter().map(|rule| (*rule).to_string()).collect(),
+            actual_rules: Vec::new(),
+            false_negative_rules: case.rules.iter().map(|rule| (*rule).to_string()).collect(),
+            false_positive_rules: Vec::new(),
+            scan_time_ms: elapsed,
+            seed_bytes: 0,
+            estimated_tokens: 0,
+            pass: false,
+        }
+    }
+}
+
+fn eval_cases() -> Vec<EvalCase> {
+    vec![
+        EvalCase {
+            name: "benign-controls",
+            verdict: "ACCEPT",
+            rules: &[],
+        },
+        EvalCase {
+            name: "benign-lockfiles",
+            verdict: "ACCEPT",
+            rules: &[],
+        },
+        EvalCase {
+            name: "npm-postinstall-download",
+            verdict: "REJECT",
+            rules: &[
+                "npm-lifecycle-script",
+                "download-execute",
+                "manifest-missing-lockfile",
+            ],
+        },
+        EvalCase {
+            name: "python-setup-command",
+            verdict: "REJECT",
+            rules: &["python-setup-command"],
+        },
+        EvalCase {
+            name: "rust-build-command",
+            verdict: "REJECT",
+            rules: &["rust-build-script-command"],
+        },
+        EvalCase {
+            name: "docker-curl-pipe",
+            verdict: "REJECT",
+            rules: &["download-execute"],
+        },
+        EvalCase {
+            name: "makefile-hidden-network",
+            verdict: "REJECT",
+            rules: &["download-execute"],
+        },
+        EvalCase {
+            name: "github-action-secret-shell",
+            verdict: "CAUTION",
+            rules: &["workflow-secret-shell", "unpinned-github-action"],
+        },
+        EvalCase {
+            name: "shell-home-write",
+            verdict: "REJECT",
+            rules: &["install-home-write"],
+        },
+        EvalCase {
+            name: "base64-shell",
+            verdict: "REJECT",
+            rules: &["base64-execute"],
+        },
+        EvalCase {
+            name: "binary-artifact-exec",
+            verdict: "REJECT",
+            rules: &["download-execute"],
+        },
+        EvalCase {
+            name: "readme-dangerous-install",
+            verdict: "REJECT",
+            rules: &["download-execute"],
+        },
+        EvalCase {
+            name: "npm-git-dependency",
+            verdict: "CAUTION",
+            rules: &["dependency-git-source", "manifest-missing-lockfile"],
+        },
+        EvalCase {
+            name: "cargo-git-dependency",
+            verdict: "CAUTION",
+            rules: &["dependency-git-source", "manifest-missing-lockfile"],
+        },
+        EvalCase {
+            name: "python-requirements-git",
+            verdict: "CAUTION",
+            rules: &["dependency-git-source", "manifest-missing-lockfile"],
+        },
+        EvalCase {
+            name: "workflow-pull-request-target",
+            verdict: "REJECT",
+            rules: &["workflow-pull-request-target"],
+        },
+        EvalCase {
+            name: "workflow-write-all",
+            verdict: "REJECT",
+            rules: &["workflow-write-all"],
+        },
+        EvalCase {
+            name: "docker-root-user",
+            verdict: "CAUTION",
+            rules: &["docker-root-user"],
+        },
+        EvalCase {
+            name: "docker-remote-repo",
+            verdict: "REJECT",
+            rules: &["docker-remote-repository", "docker-default-root"],
+        },
+        EvalCase {
+            name: "binary-extension",
+            verdict: "CAUTION",
+            rules: &[],
+        },
+        EvalCase {
+            name: "archive-payload",
+            verdict: "CAUTION",
+            rules: &[],
+        },
+    ]
+}
+
+fn eval_actual_rules(parsed: &serde_json::Value) -> BTreeSet<String> {
+    let mut rules = BTreeSet::new();
+    if let Some(findings) = parsed.get("findings").and_then(|v| v.as_array()) {
+        for finding in findings {
+            if let Some(rule) = finding.get("rule").and_then(|v| v.as_str()) {
+                rules.insert(rule.to_string());
+            }
+        }
+    }
+    rules
+}
+
 struct GithubSource {
     repo: String,
     url: String,
     requested_ref: String,
     resolved_commit: String,
+    file_count: usize,
+    byte_size: u64,
+    has_submodules: bool,
+    has_lfs: bool,
     checkout_path: PathBuf,
     cleanup: &'static str,
 }
@@ -474,11 +755,18 @@ struct GithubRepo {
     url: String,
 }
 
+struct CheckoutInspection {
+    file_count: usize,
+    byte_size: u64,
+    has_submodules: bool,
+    has_lfs: bool,
+}
+
 fn run_github_intake(github: GithubCli) -> ExitCode {
     let repo = match parse_github_repo(&github.repo) {
         Ok(repo) => repo,
         Err(e) => {
-            eprintln!("github intake error: {e}");
+            eprintln!("github intake error: unsupported_url: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -487,7 +775,7 @@ fn run_github_intake(github: GithubCli) -> ExitCode {
         .clone()
         .unwrap_or_else(|| "HEAD".to_string());
     if !valid_git_ref_arg(&requested_ref) {
-        eprintln!("github intake error: invalid --ref value");
+        eprintln!("github intake error: invalid_ref: invalid --ref value");
         return ExitCode::FAILURE;
     }
     let modes = [github.scan_only, github.agent_gate, github.benchmark]
@@ -529,12 +817,32 @@ fn run_github_intake(github: GithubCli) -> ExitCode {
         }
     };
     eprintln!("github resolved_commit: {resolved_commit}");
+    let inspection = match inspect_checkout(
+        &checkout,
+        github.max_checkout_files,
+        github.max_checkout_bytes,
+    ) {
+        Ok(inspection) => inspection,
+        Err(e) => {
+            eprintln!("github intake error: {e}");
+            cleanup_checkout(&temp_root, github.keep_checkout);
+            return ExitCode::FAILURE;
+        }
+    };
+    eprintln!(
+        "github checkout_limits: files={} bytes={} submodules={} lfs={}",
+        inspection.file_count, inspection.byte_size, inspection.has_submodules, inspection.has_lfs
+    );
 
     let source = GithubSource {
         repo: format!("{}/{}", repo.owner, repo.repo),
         url: repo.url,
         requested_ref,
         resolved_commit,
+        file_count: inspection.file_count,
+        byte_size: inspection.byte_size,
+        has_submodules: inspection.has_submodules,
+        has_lfs: inspection.has_lfs,
         checkout_path: checkout.clone(),
         cleanup: if github.keep_checkout {
             "preserved"
@@ -575,8 +883,18 @@ fn run_github_intake(github: GithubCli) -> ExitCode {
             }
         }
     } else {
-        print!("{stdout}");
-        if !github.scan_only {
+        if !github.scan_only && github.format == OutputFormat::Json {
+            match json_with_github_source(&stdout, &source) {
+                Ok(json) => println!("{json}"),
+                Err(e) => {
+                    eprintln!("github intake error: cannot annotate gate JSON: {e}");
+                    print!("{stdout}");
+                }
+            }
+        } else {
+            print!("{stdout}");
+        }
+        if !github.scan_only && github.format == OutputFormat::Text {
             print!("{}", github_source_block(&source));
         }
     }
@@ -684,6 +1002,85 @@ fn fetch_github_repo(url: &str, checkout: &Path, requested_ref: &str) -> Result<
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn inspect_checkout(
+    checkout: &Path,
+    max_files: usize,
+    max_bytes: u64,
+) -> Result<CheckoutInspection, String> {
+    let mut inspection = CheckoutInspection {
+        file_count: 0,
+        byte_size: 0,
+        has_submodules: checkout.join(".gitmodules").is_file(),
+        has_lfs: false,
+    };
+    inspect_checkout_dir(checkout, checkout, max_files, max_bytes, &mut inspection)?;
+    Ok(inspection)
+}
+
+fn inspect_checkout_dir(
+    root: &Path,
+    dir: &Path,
+    max_files: usize,
+    max_bytes: u64,
+    inspection: &mut CheckoutInspection,
+) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        format!(
+            "partial_scan: cannot read checkout directory {}: {e}",
+            dir.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            format!(
+                "partial_scan: cannot read checkout entry {}: {e}",
+                dir.display()
+            )
+        })?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if name.to_str() == Some(".git") {
+            continue;
+        }
+        let meta = entry.metadata().map_err(|e| {
+            format!(
+                "partial_scan: cannot stat checkout path {}: {e}",
+                path.display()
+            )
+        })?;
+        if meta.is_dir() {
+            inspect_checkout_dir(root, &path, max_files, max_bytes, inspection)?;
+            continue;
+        }
+        if !meta.is_file() {
+            continue;
+        }
+        inspection.file_count = inspection.file_count.saturating_add(1);
+        inspection.byte_size = inspection.byte_size.saturating_add(meta.len());
+        if path.file_name().and_then(|n| n.to_str()) == Some(".gitattributes")
+            && std::fs::read_to_string(&path)
+                .map(|src| src.contains("filter=lfs") || src.contains("filter lfs"))
+                .unwrap_or(false)
+        {
+            inspection.has_lfs = true;
+        }
+        if inspection.file_count > max_files {
+            return Err(format!(
+                "oversized_repo: file_count={} exceeds max_checkout_files={max_files}",
+                inspection.file_count
+            ));
+        }
+        if inspection.byte_size > max_bytes {
+            return Err(format!(
+                "oversized_repo: byte_size={} exceeds max_checkout_bytes={max_bytes}",
+                inspection.byte_size
+            ));
+        }
+    }
+    let _ = root;
+    Ok(())
+}
+
 fn path_arg(path: &Path) -> String {
     path.display().to_string()
 }
@@ -699,7 +1096,7 @@ fn run_git(args: &[&str]) -> Result<Output, String> {
         Ok(output)
     } else {
         Err(format!(
-            "git {} failed: {}",
+            "checkout_failure: git {} failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         ))
@@ -720,6 +1117,13 @@ fn run_local_sift_for_github(github: &GithubCli, checkout: &Path) -> Result<Outp
         args.push("--benchmark".to_string());
     } else {
         args.push("--agent-gate".to_string());
+    }
+    if github.agent_gate || (!github.scan_only && !github.benchmark) {
+        args.push("--format".to_string());
+        args.push(match github.format {
+            OutputFormat::Text => "text".to_string(),
+            OutputFormat::Json => "json".to_string(),
+        });
     }
     if let Some(value) = github.benchmark_input_1m_cost {
         args.push("--benchmark-input-1m-cost".to_string());
@@ -780,27 +1184,46 @@ fn benchmark_with_github_source(stdout: &str, source: &GithubSource) -> Result<S
     let Some(obj) = value.as_object_mut() else {
         return Err("benchmark output root is not an object".to_string());
     };
-    obj.insert(
-        "github_source".to_string(),
-        serde_json::json!({
-            "repo": source.repo,
-            "url": source.url,
-            "requested_ref": source.requested_ref,
-            "resolved_commit": source.resolved_commit,
-            "checkout_path": source.checkout_path.display().to_string(),
-            "cleanup": source.cleanup,
-        }),
-    );
+    obj.insert("github_source".to_string(), github_source_json(source));
     serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
+fn json_with_github_source(stdout: &str, source: &GithubSource) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(stdout).map_err(|e| format!("invalid JSON: {e}"))?;
+    let Some(obj) = value.as_object_mut() else {
+        return Err("gate output root is not an object".to_string());
+    };
+    obj.insert("github_source".to_string(), github_source_json(source));
+    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
+fn github_source_json(source: &GithubSource) -> serde_json::Value {
+    serde_json::json!({
+        "repo": source.repo,
+        "url": source.url,
+        "requested_ref": source.requested_ref,
+        "resolved_commit": source.resolved_commit,
+        "file_count": source.file_count,
+        "byte_size": source.byte_size,
+        "has_submodules": source.has_submodules,
+        "has_lfs": source.has_lfs,
+        "checkout_path": source.checkout_path.display().to_string(),
+        "cleanup": source.cleanup,
+    })
 }
 
 fn github_source_block(source: &GithubSource) -> String {
     format!(
-        "\nSOURCE:\n- github_repo: {}\n- github_url: {}\n- requested_ref: {}\n- resolved_commit: {}\n- checkout_path: {}\n- cleanup: {}\n",
+        "\nSOURCE:\n- github_repo: {}\n- github_url: {}\n- requested_ref: {}\n- resolved_commit: {}\n- file_count: {}\n- byte_size: {}\n- has_submodules: {}\n- has_lfs: {}\n- checkout_path: {}\n- cleanup: {}\n",
         source.repo,
         source.url,
         source.requested_ref,
         source.resolved_commit,
+        source.file_count,
+        source.byte_size,
+        source.has_submodules,
+        source.has_lfs,
         source.checkout_path.display(),
         source.cleanup
     )
@@ -874,6 +1297,8 @@ struct BenchmarkSeed {
     seed_cap_bytes: usize,
     reduce_batches: usize,
     record_truncated: usize,
+    truncated_records: Vec<report::TruncatedRecord>,
+    suspicious_artifacts: Vec<report::SuspiciousArtifact>,
 }
 
 #[derive(Serialize)]
@@ -962,6 +1387,18 @@ impl BenchmarkReport {
                 seed_cap_bytes: coverage.seed_cap,
                 reduce_batches: coverage.batches,
                 record_truncated: coverage.record_truncated,
+                truncated_records: coverage
+                    .truncated_records
+                    .iter()
+                    .take(20)
+                    .cloned()
+                    .collect(),
+                suspicious_artifacts: coverage
+                    .suspicious_artifacts
+                    .iter()
+                    .take(20)
+                    .cloned()
+                    .collect(),
             },
             model: BenchmarkModel {
                 small_model: BenchmarkSmallModel {
@@ -1084,6 +1521,8 @@ struct InputCoverage {
     candidate_seed_bytes: usize,
     seed_cap: usize,
     record_truncated: usize,
+    truncated_records: Vec<report::TruncatedRecord>,
+    suspicious_artifacts: Vec<report::SuspiciousArtifact>,
     batches: usize,
 }
 
@@ -1154,6 +1593,9 @@ impl InputCoverage {
             parse_failed: self.scan.parse_failed,
             serialization_failed: self.scan.serialization_failed,
             record_truncated: self.record_truncated,
+            seed_bytes: self.seed_bytes,
+            truncated_records: self.truncated_records.clone(),
+            suspicious_artifacts: self.suspicious_artifacts.clone(),
         }
     }
 }
@@ -1248,6 +1690,72 @@ fn audit_relative_path<'a>(path: &'a Path, root: &Path) -> &'a Path {
     path.strip_prefix(root).unwrap_or(path)
 }
 
+fn inspect_suspicious_artifact(
+    path: &str,
+    size_bytes: u64,
+    meta: &std::fs::Metadata,
+    skipped_for_size: bool,
+) -> Option<report::SuspiciousArtifact> {
+    let lower = path.replace('\\', "/").to_ascii_lowercase();
+    let file_name = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    let mut reasons = Vec::new();
+    if skipped_for_size {
+        reasons.push("large_opaque_file");
+    }
+    if is_binary_or_archive_name(file_name) {
+        reasons.push("binary_or_archive_extension");
+    }
+    if is_release_or_install_path(&lower) && is_executable(meta) {
+        reasons.push("executable_in_install_or_release_path");
+    } else if is_executable(meta) && !looks_like_text_script(file_name) {
+        reasons.push("extensionless_or_binary_executable");
+    }
+    if reasons.is_empty() {
+        return None;
+    }
+    Some(report::SuspiciousArtifact {
+        path: path.to_string(),
+        size_bytes,
+        reason: reasons.join(","),
+    })
+}
+
+fn is_binary_or_archive_name(file_name: &str) -> bool {
+    [
+        ".dylib", ".so", ".dll", ".exe", ".bin", ".wasm", ".jar", ".class", ".a", ".o", ".tar",
+        ".tgz", ".gz", ".zip", ".xz", ".7z", ".rar", ".pkg", ".dmg",
+    ]
+    .iter()
+    .any(|suffix| file_name.ends_with(suffix))
+}
+
+fn is_release_or_install_path(path: &str) -> bool {
+    path.contains("release")
+        || path.contains("dist/")
+        || path.contains("bin/")
+        || path.contains("install")
+        || path.contains("scripts/")
+}
+
+fn looks_like_text_script(file_name: &str) -> bool {
+    [
+        ".sh", ".bash", ".zsh", ".py", ".rb", ".pl", ".js", ".ts", ".lua",
+    ]
+    .iter()
+    .any(|suffix| file_name.ends_with(suffix))
+}
+
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable(_: &std::fs::Metadata) -> bool {
+    false
+}
+
 #[derive(Serialize, Default)]
 struct CompactOmitted {
     signatures: usize,
@@ -1257,8 +1765,11 @@ struct CompactOmitted {
 }
 
 struct SeedRecord {
+    path: String,
     json: String,
     truncated: bool,
+    original_bytes: usize,
+    reason: String,
 }
 
 fn compact_seed_record(sum: &extract::AstSummary, cap: usize) -> Option<SeedRecord> {
@@ -1275,12 +1786,17 @@ fn compact_seed_record(sum: &extract::AstSummary, cap: usize) -> Option<SeedReco
         let json = serde_json::to_string(&record).ok()?;
         if json.len().saturating_add(1) <= cap {
             return Some(SeedRecord {
+                path: sum.path.clone(),
                 json,
                 truncated: record.omitted.signatures
                     + record.omitted.calls
                     + record.omitted.locations
                     + record.omitted.external
                     > 0,
+                original_bytes: serde_json::to_string(sum)
+                    .map(|json| json.len())
+                    .unwrap_or(0),
+                reason: "compact_record_limits".to_string(),
             });
         }
         if loc_limit > 20 {
@@ -1296,8 +1812,13 @@ fn compact_seed_record(sum: &extract::AstSummary, cap: usize) -> Option<SeedReco
         } else {
             let minimal = compact_seed_record_with_limits(sum, 4, 8, 8, 4, 48);
             return serde_json::to_string(&minimal).ok().map(|json| SeedRecord {
+                path: sum.path.clone(),
                 json,
                 truncated: true,
+                original_bytes: serde_json::to_string(sum)
+                    .map(|json| json.len())
+                    .unwrap_or(0),
+                reason: "minimal_record_after_size_cap".to_string(),
             });
         }
     }
@@ -1372,7 +1893,6 @@ fn seed_batches(records: &[String], cap: usize) -> Vec<String> {
 
 fn build_react_batches(
     coverage: &InputCoverage,
-    observations: &str,
     seed_batches: &[String],
     language: ReportLanguage,
 ) -> Vec<String> {
@@ -1397,13 +1917,7 @@ fn build_react_batches(
                 seed_batches.len(),
                 batch.len()
             );
-            if observations.trim().is_empty() {
-                format!("{batch_context}\n\nAST_SEED_BATCH:\n{batch}")
-            } else {
-                format!(
-                    "{batch_context}\n\nSMALL_MODEL_OBSERVATIONS_ALL_BATCHES:\n{observations}\n\nAST_SEED_BATCH:\n{batch}"
-                )
-            }
+            format!("{batch_context}\n\nAST_SEED_BATCH:\n{batch}")
         })
         .collect()
 }
@@ -1422,20 +1936,44 @@ fn render_batch_reports(reports: &[BatchReport], language: ReportLanguage) -> St
             .unwrap_or_default();
     }
     let mut s = match language {
-        ReportLanguage::En => String::from("## Batched Reduce Results\n\n"),
-        ReportLanguage::Zh => String::from("## \u{5206}\u{6279} Reduce \u{7ed3}\u{679c}\n\n"),
+        ReportLanguage::En => String::from("## Converged Reduce Results\n\n"),
+        ReportLanguage::Zh => String::from("## \u{6c47}\u{603b} Reduce \u{7ed3}\u{679c}\n\n"),
     };
+    let mut rows = BTreeSet::new();
     for report in reports {
-        let batch_label = match language {
-            ReportLanguage::En => "Batch",
-            ReportLanguage::Zh => "\u{6279}\u{6b21}",
-        };
-        s.push_str(&format!(
-            "### {batch_label} {} ({} bytes)\n\n{}\n\n",
-            report.idx + 1,
-            report.bytes,
-            report.markdown
-        ));
+        for line in report.markdown.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with('|')
+                || trimmed.contains("---")
+                || trimmed.contains("Severity")
+                || trimmed.contains("\u{4e25}\u{91cd}\u{6027}")
+            {
+                continue;
+            }
+            rows.insert(trimmed.to_string());
+        }
+    }
+    if rows.is_empty() {
+        s.push_str(match language {
+            ReportLanguage::En => {
+                "No model findings survived cross-batch convergence. Review the authoritative deterministic ledger above.\n"
+            }
+            ReportLanguage::Zh => {
+                "\u{8de8}\u{6279}\u{6b21}\u{6c47}\u{603b}\u{540e}\u{65e0}\u{6a21}\u{578b}\u{98ce}\u{9669}\u{9879}\u{3002}\u{8bf7}\u{4ee5}\u{4e0a}\u{65b9}\u{786e}\u{5b9a}\u{6027}\u{53f0}\u{8d26}\u{4e3a}\u{51c6}\u{3002}\n"
+            }
+        });
+        return s;
+    }
+    s.push_str(match language {
+        ReportLanguage::En => "| Severity | Scope | Location | Rule | Finding |\n",
+        ReportLanguage::Zh => {
+            "|\u{4e25}\u{91cd}\u{6027}|\u{4f5c}\u{7528}\u{57df}|\u{4f4d}\u{7f6e}|\u{89c4}\u{5219}|\u{53d1}\u{73b0}|\n"
+        }
+    });
+    s.push_str("|---|---|---|---|---|\n");
+    for row in rows {
+        s.push_str(&row);
+        s.push('\n');
     }
     s
 }
@@ -1647,11 +2185,13 @@ mod tests {
             candidate_seed_bytes: 12,
             seed_cap: 8,
             record_truncated: 0,
+            truncated_records: Vec::new(),
+            suspicious_artifacts: Vec::new(),
             batches: 2,
         };
         let seed = vec!["one\n".to_string(), "two\n".to_string()];
 
-        let prompts = build_react_batches(&coverage, "[]", &seed, ReportLanguage::En);
+        let prompts = build_react_batches(&coverage, &seed, ReportLanguage::En);
 
         assert_eq!(prompts.len(), 2);
         assert!(prompts[0].contains("current_reduce_batch: 1"));
@@ -1674,11 +2214,43 @@ mod tests {
             candidate_seed_bytes: 1,
             seed_cap: 8,
             record_truncated: 0,
+            truncated_records: Vec::new(),
+            suspicious_artifacts: Vec::new(),
             batches: 1,
         };
 
         let section = coverage.markdown_section(ReportLanguage::Zh);
         assert!(section.contains("\u{8f93}\u{5165}\u{8986}\u{76d6}"));
+    }
+
+    #[test]
+    fn multi_batch_reduce_renders_single_converged_table() {
+        let reports = vec![
+            BatchReport {
+                idx: 0,
+                bytes: 10,
+                markdown: "# Risk Ledger\n\n| Severity | Scope | Location | Rule | Finding |\n|---|---|---|---|---|\n| HIGH | production | `src/a.rs:1` | `panic-edge` | x: `unwrap` |\n"
+                    .to_string(),
+            },
+            BatchReport {
+                idx: 1,
+                bytes: 10,
+                markdown: "# Risk Ledger\n\nNo deterministic risks found in the analyzed input.\n"
+                    .to_string(),
+            },
+        ];
+
+        let rendered = render_batch_reports(&reports, ReportLanguage::En);
+
+        assert!(rendered.contains("Converged Reduce Results"));
+        assert_eq!(
+            rendered
+                .matches("| Severity | Scope | Location | Rule | Finding |")
+                .count(),
+            1
+        );
+        assert!(!rendered.contains("Batch 2"));
+        assert!(rendered.contains("panic-edge"));
     }
 
     #[test]
@@ -1726,5 +2298,35 @@ mod tests {
         assert!(!valid_git_ref_arg("main:refs/heads/side"));
         assert!(!valid_git_ref_arg("main..side"));
         assert!(!valid_git_ref_arg("main@{1}"));
+    }
+
+    #[test]
+    fn checkout_inspection_reports_lfs_and_limits() {
+        let root = std::env::temp_dir().join(format!(
+            "sift-checkout-inspect-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("src")).ok();
+        std::fs::write(root.join(".gitattributes"), "*.bin filter=lfs\n").ok();
+        std::fs::write(root.join(".gitmodules"), "[submodule \"x\"]\n").ok();
+        std::fs::write(root.join("src/lib.rs"), "fn main() {}\n").ok();
+
+        let inspection =
+            inspect_checkout(&root, 10, 1024 * 1024).unwrap_or_else(|_| CheckoutInspection {
+                file_count: 0,
+                byte_size: 0,
+                has_submodules: false,
+                has_lfs: false,
+            });
+        assert!(inspection.has_lfs);
+        assert!(inspection.has_submodules);
+        assert!(
+            inspect_checkout(&root, 1, 1024 * 1024)
+                .err()
+                .unwrap_or_default()
+                .contains("oversized_repo")
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 }

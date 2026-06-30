@@ -7,8 +7,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: publish
-        env:
-          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          sh -c "echo synthetic release"
-
+        run: bash -c "echo synthetic release ${{ secrets.RELEASE_TOKEN }}"

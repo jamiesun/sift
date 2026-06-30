@@ -22,8 +22,8 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
         │   cross-boundary refs marked [EXTERNAL_BLACKBOX]
         ▼
   Models    multi-model registry · per-call hard timeout · breaker+backoff  [P2 ✓]
-        ▼  ┌─ small-model pool (concurrent Map filter) ─┐
-  ReACT scheduler (tool protocol, skills=local fns, retry≤N)        [P3 ✓]
+        ▼
+  ReACT scheduler (tool protocol, local coarse filter, retry≤N)      [P3 ✓]
         │  └─ large model (Reduce convergence) ─────────┘
         ▼
   Report    stdout Markdown risk list (line/call-chain)            [P4 started]
@@ -34,9 +34,9 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 ## Project Profile (target state)
 
 - **Zero-friction cold start.** `sift ./repo --scan-only` just runs; missing `~/.sift/config.toml` is created with non-secret defaults; no interactive prompts; exits with an injection hint if the key is missing.
-- **Cost-controlled & budgetable.** Tokens mostly spent on small models; the large model only sees the dehydrated skeleton.
-- **Big/small co-scheduling.** A ReACT state machine chains coarse filter (small) and convergence (large); skills are compile-time local functions.
-- **Multi-model + concurrency.** Multiple endpoints configurable; small-model pool runs Map concurrently; large model converges once.
+- **Cost-controlled & budgetable.** The deterministic baseline is local; the large model only sees the dehydrated skeleton when full audit is requested.
+- **Model orchestration.** A ReACT state machine chains local coarse filtering and large-model convergence; skills are compile-time local functions.
+- **Multi-model + concurrency.** Multiple endpoints are configurable; scan/model concurrency remains bounded and observable.
 - **Never grind blindly.** Every external call has a hard timeout; repeated failures trip the breaker; on trip, back off / degrade or emit a partial report — never hang.
 - **Engineering-grade by default.** A clean-looking but incomplete audit is a defect. Any skipped input, truncation, fallback, partial model result, or invalid config must be visible and testable.
 - **Stable machine contracts.** Scan JSONL, final Markdown, diagnostics, and generated reports have separate channels. Downstream scripts must be able to consume stdout without guessing whether it contains mixed formats.
@@ -67,7 +67,7 @@ src/scanner.rs    Walk + bounded channel                       [P0✓]
 src/extract.rs    tree-sitter dehydrate → AstSummary           [P1✓]
 src/model.rs      multi-model registry/client trait/timeout    [P2✓]
 src/react.rs      ReACT state machine + skill enum/match       [P3 ✓]
-src/skills.rs     local skill fns (map filter / reduce)        [P3 ✓→P4]
+src/skills.rs     local skill fns (coarse filter / reduce)     [P3 ✓→P4]
 src/report.rs     Markdown risk-list renderer                  [P4]
 src/audit.rs      internal gate dimension scoring              [P5]
 ```
@@ -75,7 +75,7 @@ src/audit.rs      internal gate dimension scoring              [P5]
 ## Multi-model & concurrency (config schema)
 
 ```toml
-concurrency = 8          # small-model concurrency cap
+concurrency = 8          # scan/model concurrency cap
 [[model]]
 role = "small"           # small=filter pool / large=convergence
 endpoint = "..."
@@ -121,10 +121,10 @@ Features: tree-sitter Rust/Python/Go/JavaScript/TypeScript/HTML/CSS/Zig/Bash/Dar
 Features: ModelClient trait, registry, role routing; per-call timeout, breaker, backoff. Bounds: no cache/persist; keys env/file only, never logged. Gate: timeout/bad-response simulated, breaker trips; no plaintext keys.
 
 ### P3 ReACT scheduler — done ✓
-Features: enum state machine, initial tool protocol prompt, large model emits `<TOOL_CALL>`, match-routes local skills via `$SEED`; retry≤N then partial. Bounds: compile-time skills, no dynamic load. Gate: bad JSON/unknown skill/N errors all trip; react.rs tested. Small-pool concurrency wired by P4.
+Features: enum state machine, initial tool protocol prompt, large model emits `<TOOL_CALL>`, match-routes local skills via `$SEED`; retry≤N then partial. Bounds: compile-time skills, no dynamic load. Gate: bad JSON/unknown skill/N errors all trip; react.rs tested.
 
 ### P4 Map+Reduce+report
-Features: deterministic AST coarse ledger, Markdown renderer, real `[[model]]` TOML parsing, small-pool Map waves, explicit input coverage, and clean stdout boundaries. Bounds: module mode slices root only; truncation and degraded model paths must be visible. Gate: hits seeded risks; module/project don't bleed; full-audit stdout contains only the report; invalid config fails; fake-endpoint full audit smoke proves the user-facing path.
+Features: deterministic AST coarse ledger, Markdown renderer, real `[[model]]` TOML parsing, explicit input coverage, stable JSON agent-gate output, policy controls, artifact inventory, eval corpus, and clean stdout boundaries. Bounds: module mode slices root only; truncation and degraded model paths must be visible. Gate: hits seeded risks; module/project don't bleed; full-audit stdout contains only the report; invalid config fails; fake-endpoint full audit smoke proves the user-facing path.
 
 ### P5 Internal Quality Gate
 Features: audit.rs scores trimmed dimensions and writes maintainer-only reports to `reports/` (gitignored). Gate: no FAIL/WARN for hard rules, including no broad dead-code allows, no Chinese source strings/comments, clean report stream boundary, and visible seed truncation.

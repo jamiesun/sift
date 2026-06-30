@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ReportLanguage;
+use crate::config::{Policy, PolicyMatcher, ReportLanguage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -126,7 +126,7 @@ pub struct RiskFinding {
     pub evidence: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentGateCoverage {
     pub candidate_files: usize,
     pub dehydrated_files: usize,
@@ -135,11 +135,30 @@ pub struct AgentGateCoverage {
     pub parse_failed: usize,
     pub serialization_failed: usize,
     pub record_truncated: usize,
+    pub seed_bytes: usize,
+    pub suspicious_artifacts: Vec<SuspiciousArtifact>,
+    pub truncated_records: Vec<TruncatedRecord>,
 }
 
 pub struct AgentGateReport {
     pub markdown: String,
+    pub json: String,
     pub safe_to_agent_run: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SuspiciousArtifact {
+    pub path: String,
+    pub size_bytes: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TruncatedRecord {
+    pub path: String,
+    pub original_bytes: usize,
+    pub compacted_bytes: usize,
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,24 +219,39 @@ pub fn markdown_from_findings_json_with_language(
     Some(render_markdown_with_language(&findings, language))
 }
 
+#[allow(dead_code)]
 pub fn agent_gate_from_seed(seed: &str, coverage: AgentGateCoverage) -> AgentGateReport {
-    render_agent_gate(&findings_from_seed(seed), coverage)
+    agent_gate_from_seed_with_policy(seed, coverage, &Policy::default())
+}
+
+pub fn agent_gate_from_seed_with_policy(
+    seed: &str,
+    coverage: AgentGateCoverage,
+    policy: &Policy,
+) -> AgentGateReport {
+    let (findings, policy_actions) = apply_policy(findings_from_seed(seed), policy);
+    render_agent_gate(&findings, coverage, policy, &policy_actions)
 }
 
 pub fn findings_from_seed(seed: &str) -> Vec<RiskFinding> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut rows = Vec::new();
 
     for line in seed.lines() {
         let Ok(row) = serde_json::from_str::<AstRow>(line) else {
             continue;
         };
-        let ctx = RowRiskContext::new(&row);
+        rows.push(row);
+    }
+
+    for row in &rows {
+        let ctx = RowRiskContext::new(row);
 
         if row.locations.is_empty() {
-            for call in row.calls {
-                push_call_risk(&mut out, &mut seen, &row.path, None, &call);
-                push_supply_chain_risks(&mut out, &mut seen, &row.path, None, &call, &ctx);
+            for call in &row.calls {
+                push_call_risk(&mut out, &mut seen, &row.path, None, call);
+                push_supply_chain_risks(&mut out, &mut seen, &row.path, None, call, &ctx);
             }
         }
 
@@ -264,7 +298,7 @@ pub fn findings_from_seed(seed: &str) -> Vec<RiskFinding> {
             }
         }
 
-        for ext in row.external {
+        for ext in &row.external {
             let text = ext.trim_start_matches("[EXTERNAL_BLACKBOX] ").to_string();
             push_unique(
                 &mut out,
@@ -280,6 +314,9 @@ pub fn findings_from_seed(seed: &str) -> Vec<RiskFinding> {
             );
         }
     }
+
+    push_manifest_risks(&mut out, &mut seen, &rows);
+    push_container_global_risks(&mut out, &mut seen, &rows);
 
     out.sort_by(|a, b| {
         severity_rank(a.severity)
@@ -365,12 +402,19 @@ fn title_for_language(title: &str, language: ReportLanguage) -> &str {
     }
 }
 
-fn render_agent_gate(findings: &[RiskFinding], coverage: AgentGateCoverage) -> AgentGateReport {
-    let incomplete = gate_incomplete_reasons(coverage);
+fn render_agent_gate(
+    findings: &[RiskFinding],
+    coverage: AgentGateCoverage,
+    policy: &Policy,
+    policy_actions: &[String],
+) -> AgentGateReport {
+    let incomplete = gate_incomplete_reasons(&coverage, policy);
     let verdict = if !incomplete.is_empty() {
         "INCOMPLETE"
     } else if findings.iter().any(|f| f.severity == Severity::High) {
         "REJECT"
+    } else if !coverage.suspicious_artifacts.is_empty() {
+        "CAUTION"
     } else if findings.is_empty() {
         "ACCEPT"
     } else {
@@ -380,20 +424,21 @@ fn render_agent_gate(findings: &[RiskFinding], coverage: AgentGateCoverage) -> A
     let mut s = format!("VERDICT: {verdict}\n");
 
     s.push_str("WHY:\n");
-    for line in gate_why_lines(findings, &incomplete) {
+    let why = gate_why_lines(findings, &coverage, &incomplete);
+    for line in &why {
         s.push_str("- ");
-        s.push_str(&line);
+        s.push_str(line);
         s.push('\n');
     }
 
     s.push_str("BLOCKERS:\n");
-    let blockers = gate_blocker_lines(findings, &incomplete);
+    let blockers = gate_blocker_lines(findings, &coverage, &incomplete);
     if blockers.is_empty() {
         s.push_str("- none\n");
     } else {
-        for line in blockers {
+        for line in &blockers {
             s.push_str("- ");
-            s.push_str(&line);
+            s.push_str(line);
             s.push('\n');
         }
     }
@@ -413,14 +458,68 @@ fn render_agent_gate(findings: &[RiskFinding], coverage: AgentGateCoverage) -> A
         coverage.serialization_failed,
         coverage.record_truncated,
     ));
+    s.push_str(&format!("- seed_bytes: {}\n", coverage.seed_bytes));
+    if !coverage.truncated_records.is_empty() {
+        s.push_str("TRUNCATED_RECORDS:\n");
+        for record in coverage.truncated_records.iter().take(10) {
+            s.push_str(&format!(
+                "- {} original_bytes={} compacted_bytes={} reason={}\n",
+                record.path, record.original_bytes, record.compacted_bytes, record.reason
+            ));
+        }
+    }
+    if !coverage.suspicious_artifacts.is_empty() {
+        s.push_str("ARTIFACTS:\n");
+        for artifact in coverage.suspicious_artifacts.iter().take(10) {
+            s.push_str(&format!(
+                "- {} size_bytes={} reason={}\n",
+                artifact.path, artifact.size_bytes, artifact.reason
+            ));
+        }
+    }
+    if !policy_actions.is_empty() {
+        s.push_str("POLICY:\n");
+        for action in policy_actions {
+            s.push_str("- ");
+            s.push_str(action);
+            s.push('\n');
+        }
+    }
+
+    let json = serde_json::to_string_pretty(&AgentGateJson {
+        schema_version: 1,
+        verdict,
+        safe_to_agent_run,
+        exit_reason: verdict.to_ascii_lowercase(),
+        why,
+        blockers,
+        coverage,
+        findings: findings.to_vec(),
+        policy_actions: policy_actions.to_vec(),
+    })
+    .unwrap_or_else(|_| "{}".to_string());
 
     AgentGateReport {
         markdown: s,
+        json,
         safe_to_agent_run,
     }
 }
 
-fn gate_incomplete_reasons(coverage: AgentGateCoverage) -> Vec<String> {
+#[derive(Serialize)]
+struct AgentGateJson<'a> {
+    schema_version: u8,
+    verdict: &'a str,
+    safe_to_agent_run: bool,
+    exit_reason: String,
+    why: Vec<String>,
+    blockers: Vec<String>,
+    coverage: AgentGateCoverage,
+    findings: Vec<RiskFinding>,
+    policy_actions: Vec<String>,
+}
+
+fn gate_incomplete_reasons(coverage: &AgentGateCoverage, policy: &Policy) -> Vec<String> {
     let mut reasons = Vec::new();
     if coverage.read_failed > 0 {
         reasons.push(format!("read_failed={}", coverage.read_failed));
@@ -437,13 +536,28 @@ fn gate_incomplete_reasons(coverage: AgentGateCoverage) -> Vec<String> {
     if coverage.record_truncated > 0 {
         reasons.push(format!("record_truncated={}", coverage.record_truncated));
     }
-    if coverage.candidate_files > 0 && coverage.dehydrated_files == 0 {
+    if coverage.candidate_files > 0
+        && coverage.dehydrated_files == 0
+        && coverage.suspicious_artifacts.is_empty()
+    {
         reasons.push("no_supported_files_dehydrated".to_string());
+    }
+    if let Some(limit) = policy.max_candidate_files
+        && coverage.candidate_files > limit
+    {
+        reasons.push(format!(
+            "candidate_files={} exceeds policy max_candidate_files={limit}",
+            coverage.candidate_files
+        ));
     }
     reasons
 }
 
-fn gate_why_lines(findings: &[RiskFinding], incomplete: &[String]) -> Vec<String> {
+fn gate_why_lines(
+    findings: &[RiskFinding],
+    coverage: &AgentGateCoverage,
+    incomplete: &[String],
+) -> Vec<String> {
     if !incomplete.is_empty() {
         return incomplete
             .iter()
@@ -452,6 +566,14 @@ fn gate_why_lines(findings: &[RiskFinding], incomplete: &[String]) -> Vec<String
             .collect();
     }
     if findings.is_empty() {
+        if !coverage.suspicious_artifacts.is_empty() {
+            return coverage
+                .suspicious_artifacts
+                .iter()
+                .take(3)
+                .map(|artifact| format!("Suspicious artifact requires review: {}", artifact.path))
+                .collect();
+        }
         return vec![
             "No deterministic risks found in the analyzed input.".to_string(),
             "This gate does not replace manual review of runtime behavior.".to_string(),
@@ -470,19 +592,127 @@ fn gate_why_lines(findings: &[RiskFinding], incomplete: &[String]) -> Vec<String
         .collect()
 }
 
-fn gate_blocker_lines(findings: &[RiskFinding], incomplete: &[String]) -> Vec<String> {
+fn gate_blocker_lines(
+    findings: &[RiskFinding],
+    coverage: &AgentGateCoverage,
+    incomplete: &[String],
+) -> Vec<String> {
     if !incomplete.is_empty() {
-        return incomplete
+        let mut lines: Vec<String> = incomplete
             .iter()
             .map(|reason| format!("coverage requires review: {reason}"))
             .collect();
+        for record in coverage.truncated_records.iter().take(10) {
+            lines.push(format!(
+                "truncated record: {} original_bytes={} compacted_bytes={} reason={}",
+                record.path, record.original_bytes, record.compacted_bytes, record.reason
+            ));
+        }
+        return lines;
     }
-    findings
+    let mut lines: Vec<String> = findings
         .iter()
         .filter(|finding| finding.severity != Severity::Low)
         .take(10)
         .map(finding_summary)
-        .collect()
+        .collect();
+    for artifact in coverage.suspicious_artifacts.iter().take(10) {
+        lines.push(format!(
+            "artifact requires review: {} size_bytes={} reason={}",
+            artifact.path, artifact.size_bytes, artifact.reason
+        ));
+    }
+    lines
+}
+
+fn apply_policy(findings: Vec<RiskFinding>, policy: &Policy) -> (Vec<RiskFinding>, Vec<String>) {
+    let mut actions = Vec::new();
+    let mut out = Vec::new();
+    for mut finding in findings {
+        if let Some(rule) = policy
+            .allowlist
+            .iter()
+            .find(|rule| policy_match(rule, &finding))
+        {
+            actions.push(format!(
+                "suppressed {} at {} by allowlist{}",
+                finding.rule,
+                finding.path,
+                policy_reason(rule.reason.as_deref())
+            ));
+            continue;
+        }
+        if let Some(rule) = policy
+            .denylist
+            .iter()
+            .find(|rule| policy_match(rule, &finding))
+            && finding.severity != Severity::High
+        {
+            finding.severity = Severity::High;
+            actions.push(format!(
+                "raised {} at {} to high by denylist{}",
+                finding.rule,
+                finding.path,
+                policy_reason(rule.reason.as_deref())
+            ));
+        }
+        for override_rule in &policy.severity_overrides {
+            if policy_override_match(override_rule, &finding)
+                && let Some(severity) = severity_from_policy(&override_rule.severity)
+                && finding.severity != severity
+            {
+                finding.severity = severity;
+                actions.push(format!(
+                    "set {} at {} severity to {} by override{}",
+                    finding.rule,
+                    finding.path,
+                    override_rule.severity,
+                    policy_reason(override_rule.reason.as_deref())
+                ));
+            }
+        }
+        out.push(finding);
+    }
+    (out, actions)
+}
+
+fn policy_match(rule: &PolicyMatcher, finding: &RiskFinding) -> bool {
+    rule.path
+        .as_deref()
+        .is_none_or(|path| normalized_path(&finding.path).contains(&normalized_path(path)))
+        && rule
+            .rule
+            .as_deref()
+            .is_none_or(|r| r == finding.rule.as_str())
+}
+
+fn policy_override_match(
+    rule: &crate::config::PolicySeverityOverride,
+    finding: &RiskFinding,
+) -> bool {
+    rule.path
+        .as_deref()
+        .is_none_or(|path| normalized_path(&finding.path).contains(&normalized_path(path)))
+        && rule
+            .rule
+            .as_deref()
+            .is_none_or(|r| r == finding.rule.as_str())
+}
+
+fn severity_from_policy(value: &str) -> Option<Severity> {
+    match value {
+        "high" => Some(Severity::High),
+        "medium" => Some(Severity::Medium),
+        "low" => Some(Severity::Low),
+        _ => None,
+    }
+}
+
+fn policy_reason(reason: Option<&str>) -> String {
+    reason
+        .filter(|reason| !reason.trim().is_empty())
+        .map(|reason| format!(" ({reason})"))
+        .unwrap_or_default()
 }
 
 fn finding_summary(finding: &RiskFinding) -> String {
@@ -654,9 +884,7 @@ fn push_supply_chain_risks(
         );
     }
 
-    if ctx.github_workflow
-        && (contains_workflow_secret(text) || (ctx.workflow_has_secret && is_run_line(text)))
-    {
+    if ctx.github_workflow && looks_like_workflow_secret_shell(text, ctx.workflow_has_secret) {
         push_unique(
             out,
             seen,
@@ -681,6 +909,82 @@ fn push_supply_chain_risks(
                 line,
                 rule: "unpinned-github-action".to_string(),
                 title: "GitHub Action reference is not pinned to a commit SHA".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if ctx.github_workflow && looks_like_pull_request_target(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::High,
+                path: path.to_string(),
+                line,
+                rule: "workflow-pull-request-target".to_string(),
+                title: "pull_request_target can run untrusted contribution code with elevated token scope".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if ctx.github_workflow && looks_like_write_all_permissions(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::High,
+                path: path.to_string(),
+                line,
+                rule: "workflow-write-all".to_string(),
+                title: "GitHub Actions workflow grants broad write permissions".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if is_dockerfile_path(path) && looks_like_remote_package_repository(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::High,
+                path: path.to_string(),
+                line,
+                rule: "docker-remote-repository".to_string(),
+                title: "Dockerfile adds a remote package repository during build".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if is_dockerfile_path(path) && looks_like_docker_root_user(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::Medium,
+                path: path.to_string(),
+                line,
+                rule: "docker-root-user".to_string(),
+                title: "Container build explicitly runs as root".to_string(),
+                evidence: sanitize_evidence(text),
+            },
+        );
+    }
+
+    if looks_like_privileged_container(text) {
+        push_unique(
+            out,
+            seen,
+            RiskFinding {
+                severity: Severity::High,
+                path: path.to_string(),
+                line,
+                rule: "container-privileged".to_string(),
+                title: "Container configuration requests privileged or host-mounted execution"
+                    .to_string(),
                 evidence: sanitize_evidence(text),
             },
         );
@@ -801,6 +1105,74 @@ fn is_run_line(text: &str) -> bool {
     text.trim_start().starts_with("run:")
 }
 
+fn looks_like_workflow_secret_shell(text: &str, workflow_has_secret: bool) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if contains_workflow_secret(text)
+        && (is_run_line(text)
+            || lower.contains("bash")
+            || lower.contains("sh ")
+            || lower.contains("shell:"))
+    {
+        return true;
+    }
+    workflow_has_secret
+        && is_run_line(text)
+        && (lower.contains("${{ github.event")
+            || lower.contains("${{ github.head_ref")
+            || lower.contains("${{ github.ref_name")
+            || lower.contains("${{ inputs.")
+            || lower.contains("${{ matrix.")
+            || lower.contains("eval ")
+            || lower.contains("bash -c")
+            || lower.contains("sh -c"))
+}
+
+fn looks_like_pull_request_target(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("pull_request_target")
+}
+
+fn looks_like_write_all_permissions(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("permissions: write-all")
+        || (lower.trim_start().starts_with("contents: write")
+            || lower.trim_start().starts_with("actions: write")
+            || lower.trim_start().starts_with("packages: write"))
+}
+
+fn is_dockerfile_path(path: &str) -> bool {
+    let path = normalized_path(path).to_ascii_lowercase();
+    path.ends_with("/dockerfile")
+        || path == "dockerfile"
+        || path.ends_with("/containerfile")
+        || path == "containerfile"
+        || path.ends_with(".dockerfile")
+        || path.ends_with(".containerfile")
+}
+
+fn looks_like_remote_package_repository(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    (lower.contains("add-apt-repository")
+        || lower.contains("/etc/apt/sources.list")
+        || lower.contains("/etc/yum.repos.d")
+        || lower.contains("apk add") && lower.contains("--repository"))
+        && (lower.contains("http://") || lower.contains("https://") || lower.contains("curl"))
+}
+
+fn looks_like_docker_root_user(text: &str) -> bool {
+    text.trim_start()
+        .to_ascii_lowercase()
+        .starts_with("user root")
+}
+
+fn looks_like_privileged_container(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("--privileged")
+        || lower.contains("privileged: true")
+        || lower.contains("/var/run/docker.sock")
+        || lower.contains(":/host")
+        || lower.contains("source: /")
+}
+
 fn is_unpinned_action_use(text: &str) -> bool {
     let trimmed = text.trim_start();
     if !trimmed.starts_with("uses:") {
@@ -814,6 +1186,227 @@ fn is_unpinned_action_use(text: &str) -> bool {
 
 fn is_full_sha(reference: &str) -> bool {
     reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn push_manifest_risks(out: &mut Vec<RiskFinding>, seen: &mut BTreeSet<String>, rows: &[AstRow]) {
+    let paths: BTreeSet<String> = rows
+        .iter()
+        .map(|row| normalized_path(&row.path).to_ascii_lowercase())
+        .collect();
+    let has_package_json = paths
+        .iter()
+        .any(|p| p.ends_with("/package.json") || p == "package.json");
+    let has_npm_lock = paths.iter().any(|p| {
+        matches!(
+            p.as_str(),
+            "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "bun.lockb"
+        ) || p.ends_with("/package-lock.json")
+            || p.ends_with("/pnpm-lock.yaml")
+            || p.ends_with("/yarn.lock")
+            || p.ends_with("/bun.lockb")
+    });
+    let has_cargo_toml = paths
+        .iter()
+        .any(|p| p.ends_with("/cargo.toml") || p == "cargo.toml");
+    let has_cargo_lock = paths
+        .iter()
+        .any(|p| p.ends_with("/cargo.lock") || p == "cargo.lock");
+    let has_pyproject = paths
+        .iter()
+        .any(|p| p.ends_with("/pyproject.toml") || p == "pyproject.toml");
+    let has_requirements = paths
+        .iter()
+        .any(|p| p.ends_with("/requirements.txt") || p == "requirements.txt");
+    let has_python_lock = paths.iter().any(|p| {
+        matches!(p.as_str(), "poetry.lock" | "uv.lock" | "pdm.lock")
+            || p.ends_with("/poetry.lock")
+            || p.ends_with("/uv.lock")
+            || p.ends_with("/pdm.lock")
+    });
+
+    if has_package_json && !has_npm_lock {
+        let path = first_matching_path(&paths, "package.json").unwrap_or("package.json");
+        push_unique(
+            out,
+            seen,
+            manifest_finding(
+                path,
+                "manifest-missing-lockfile",
+                "Package manifest has no lockfile for reproducible dependency resolution",
+                "npm package.json without package-lock/pnpm-lock/yarn.lock/bun.lockb",
+            ),
+        );
+    }
+    if has_cargo_toml && !has_cargo_lock {
+        let path = first_matching_path(&paths, "Cargo.toml").unwrap_or("Cargo.toml");
+        push_unique(
+            out,
+            seen,
+            manifest_finding(
+                path,
+                "manifest-missing-lockfile",
+                "Package manifest has no lockfile for reproducible dependency resolution",
+                "Cargo.toml without Cargo.lock",
+            ),
+        );
+    }
+    if (has_pyproject || has_requirements) && !has_python_lock {
+        let path = first_matching_path(&paths, "pyproject.toml")
+            .or_else(|| first_matching_path(&paths, "requirements.txt"))
+            .unwrap_or("pyproject.toml");
+        push_unique(
+            out,
+            seen,
+            manifest_finding(
+                path,
+                "manifest-missing-lockfile",
+                "Package manifest has no lockfile for reproducible dependency resolution",
+                "Python manifest without poetry.lock/uv.lock/pdm.lock",
+            ),
+        );
+    }
+
+    for row in rows {
+        if !is_manifest_or_lockfile_path(&row.path) {
+            continue;
+        }
+        for loc in &row.locations {
+            let lower = loc.text.to_ascii_lowercase();
+            if lower.contains("git+")
+                || lower.contains("git =")
+                || lower.contains("git=")
+                || lower.contains("git:")
+                || lower.contains("github.com/")
+            {
+                push_unique(
+                    out,
+                    seen,
+                    RiskFinding {
+                        severity: Severity::Medium,
+                        path: row.path.clone(),
+                        line: Some(loc.line),
+                        rule: "dependency-git-source".to_string(),
+                        title: "Dependency source is a git reference that may not be immutable"
+                            .to_string(),
+                        evidence: sanitize_evidence(&loc.text),
+                    },
+                );
+            }
+            if (lower.contains("http://") || lower.contains("https://"))
+                && !lower.contains("registry.npmjs.org")
+                && !lower.contains("crates.io")
+                && !lower.contains("pypi.org")
+            {
+                push_unique(
+                    out,
+                    seen,
+                    RiskFinding {
+                        severity: Severity::Medium,
+                        path: row.path.clone(),
+                        line: Some(loc.line),
+                        rule: "dependency-http-source".to_string(),
+                        title: "Dependency source is fetched from an explicit URL".to_string(),
+                        evidence: sanitize_evidence(&loc.text),
+                    },
+                );
+            }
+            if lower.contains("path =") || lower.contains("\"file:") || lower.contains(" path ") {
+                push_unique(
+                    out,
+                    seen,
+                    RiskFinding {
+                        severity: Severity::Low,
+                        path: row.path.clone(),
+                        line: Some(loc.line),
+                        rule: "dependency-path-source".to_string(),
+                        title: "Dependency source uses a local path reference".to_string(),
+                        evidence: sanitize_evidence(&loc.text),
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn push_container_global_risks(
+    out: &mut Vec<RiskFinding>,
+    seen: &mut BTreeSet<String>,
+    rows: &[AstRow],
+) {
+    for row in rows {
+        if !is_dockerfile_path(&row.path) {
+            continue;
+        }
+        let from_scratch = row.locations.iter().any(|loc| {
+            loc.text
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("from scratch")
+        });
+        let has_user = row.locations.iter().any(|loc| {
+            loc.text
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("user ")
+        });
+        if !has_user && !from_scratch {
+            push_unique(
+                out,
+                seen,
+                RiskFinding {
+                    severity: Severity::Medium,
+                    path: row.path.clone(),
+                    line: None,
+                    rule: "docker-default-root".to_string(),
+                    title: "Dockerfile has no USER directive, so runtime defaults to root"
+                        .to_string(),
+                    evidence: "no USER directive".to_string(),
+                },
+            );
+        }
+    }
+}
+
+fn manifest_finding(path: &str, rule: &str, title: &str, evidence: &str) -> RiskFinding {
+    RiskFinding {
+        severity: Severity::Medium,
+        path: path.to_string(),
+        line: None,
+        rule: rule.to_string(),
+        title: title.to_string(),
+        evidence: evidence.to_string(),
+    }
+}
+
+fn first_matching_path<'a>(paths: &'a BTreeSet<String>, name: &str) -> Option<&'a str> {
+    let lower_name = name.to_ascii_lowercase();
+    paths
+        .iter()
+        .find(|path| {
+            let lower = path.to_ascii_lowercase();
+            lower == lower_name || lower.ends_with(&format!("/{lower_name}"))
+        })
+        .map(String::as_str)
+}
+
+fn is_manifest_or_lockfile_path(path: &str) -> bool {
+    let path = normalized_path(path).to_ascii_lowercase();
+    let name = path.rsplit('/').next().unwrap_or(path.as_str());
+    matches!(
+        name,
+        "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "bun.lockb"
+            | "cargo.toml"
+            | "cargo.lock"
+            | "pyproject.toml"
+            | "requirements.txt"
+            | "poetry.lock"
+            | "uv.lock"
+            | "pdm.lock"
+    )
 }
 
 fn sanitize_evidence(text: &str) -> String {
@@ -981,7 +1574,7 @@ mod tests {
 
     #[test]
     fn flags_workflow_secret_shell_and_redacts_secret_name() {
-        let seed = r#"{"path":".github/workflows/release.yml","locations":[{"kind":"signature","line":10,"text":"run: |"},{"kind":"signature","line":11,"text":"TOKEN: ${{ secrets.RELEASE_TOKEN }}"}]}"#;
+        let seed = r#"{"path":".github/workflows/release.yml","locations":[{"kind":"signature","line":10,"text":"run: bash -c \"deploy ${{ secrets.RELEASE_TOKEN }}\""}]}"#;
         let findings = findings_from_seed(seed);
 
         assert!(findings.iter().any(|f| {
@@ -993,6 +1586,19 @@ mod tests {
             !findings
                 .iter()
                 .any(|f| f.evidence.contains("RELEASE_TOKEN"))
+        );
+    }
+
+    #[test]
+    fn workflow_secret_shell_does_not_flag_bare_run_lines() {
+        let seed = r#"{"path":".github/workflows/release.yml","locations":[{"kind":"signature","line":10,"text":"run: |"},{"kind":"signature","line":11,"text":"TOKEN: ${{ secrets.RELEASE_TOKEN }}"}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == "workflow-secret-shell" && f.line == Some(10)),
+            "bare run line should not inherit file-scope secret risk: {findings:?}"
         );
     }
 

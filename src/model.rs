@@ -206,6 +206,7 @@ pub struct Registry {
 }
 
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct MapReport {
     pub observations: String,
     pub chunks_total: usize,
@@ -238,6 +239,7 @@ impl Registry {
     }
 
     /// Run bounded Map waves over AST seed chunks. Failed chunks get one chunk-level retry.
+    #[allow(dead_code)]
     pub fn map_small_pool(&mut self, seed: &str, max_parallel: usize) -> MapReport {
         let chunks = seed_chunks(seed, 16 * 1024);
         let chunks_total = chunks.len();
@@ -321,12 +323,14 @@ impl Registry {
     }
 }
 
+#[allow(dead_code)]
 fn small_prompt(chunk: &str) -> String {
     format!(
         "You are sift's cheap Map-stage auditor. Read this dehydrated AST JSONL chunk and return only concise risk findings with file/line evidence. If no signal, return [].\nAST JSONL:\n{chunk}"
     )
 }
 
+#[allow(dead_code)]
 fn seed_chunks(seed: &str, max_bytes: usize) -> Vec<String> {
     let max_bytes = max_bytes.max(1);
     let mut chunks = Vec::new();

@@ -15,6 +15,7 @@
 ```sh
 sift ./repo --scan-only        # 仅扫描层
 sift ./repo --agent-gate       # 确定性预运行门禁，无需模型 Key
+sift ./repo --benchmark        # 扫描/模型预算 telemetry JSON，无需模型 Key
 sift ./repo --module src        # 审子模块
 SIFT_API_KEY=<KEY> sift ./repo  # 全链路
 sift ./repo --api-key-file ~/.sift/key
@@ -48,9 +49,23 @@ SHA 的 GitHub Actions。
 
 完整审计的 stdout 只保留最终 Markdown 报告；进度、状态和 debug 诊断都走 stderr，长任务不会看起来像卡死，也不影响下游工具安全消费 stdout。
 
+`--benchmark` 是本地 telemetry 模式，用于 release note 和成本核算。
+它不会调用模型；默认向 stdout 输出稳定 JSON，也可以用
+`--benchmark-output <path>` 写入文件。报告包含候选/脱水/跳过计数、
+扫描耗时、可用的 resident memory 指标、seed 字节数、计划 Reduce
+批次、模型调用计数、近似 token 数，以及可选 USD 成本估算。价格必须
+显式传入，不会自动猜测：
+
+```sh
+sift ./repo --benchmark \
+  --benchmark-input-1m-cost 0.25 \
+  --benchmark-output-1m-cost 1.00 \
+  --benchmark-estimated-output-tokens 2000
+```
+
 ## 支持语言
 
-扫描层目前支持 Rust、Python、Go、JavaScript、TypeScript/TSX、HTML、CSS、Zig、Bash 兼容 shell 文件（`.sh`、`.bash`、`.zsh`）、Dart、Kotlin、Java、C/C++、C#、PHP、Swift、Ruby、SQL、Dockerfile/Containerfile、YAML、HCL/Terraform、Vue 和 Svelte。
+扫描层目前支持 Rust、Python、Go、JavaScript、TypeScript/TSX、HTML、CSS、Zig、Bash 兼容 shell 文件（`.sh`、`.bash`、`.zsh`）、Dart、Kotlin、Java、C/C++、C#、PHP、Swift、Ruby、SQL、Dockerfile/Containerfile、YAML、HCL/Terraform、Vue、Svelte、`package.json`、Makefile 和 Markdown 安装片段。
 
 ## 安装
 

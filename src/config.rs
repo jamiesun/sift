@@ -96,6 +96,26 @@ pub struct Cli {
     #[arg(long)]
     pub agent_gate: bool,
 
+    /// Run scan/dehydrate benchmark telemetry and do not call models
+    #[arg(long)]
+    pub benchmark: bool,
+
+    /// Write benchmark JSON to this path instead of stdout
+    #[arg(long)]
+    pub benchmark_output: Option<PathBuf>,
+
+    /// Estimated input-token price per 1M tokens, in USD
+    #[arg(long)]
+    pub benchmark_input_1m_cost: Option<f64>,
+
+    /// Estimated output-token price per 1M tokens, in USD
+    #[arg(long)]
+    pub benchmark_output_1m_cost: Option<f64>,
+
+    /// Estimated output tokens to include in benchmark cost math
+    #[arg(long)]
+    pub benchmark_estimated_output_tokens: Option<u64>,
+
     /// Markdown report language
     #[arg(long, alias = "report-lang", value_enum, default_value = "en")]
     pub report_language: ReportLanguage,
@@ -161,6 +181,11 @@ pub struct Config {
     pub ignores: Vec<String>,
     pub scan_only: bool,
     pub agent_gate: bool,
+    pub benchmark: bool,
+    pub benchmark_output: Option<PathBuf>,
+    pub benchmark_input_1m_cost: Option<f64>,
+    pub benchmark_output_1m_cost: Option<f64>,
+    pub benchmark_estimated_output_tokens: u64,
     pub endpoint: String,
     pub model: String,
     pub small_endpoint: String,
@@ -176,9 +201,17 @@ pub struct Config {
 impl Config {
     /// Resolve order: CLI key file > ENV > project .env > ~/.sift/config.toml; defaults fill non-secret fields.
     pub fn resolve(cli: Cli) -> Result<Self> {
-        if cli.scan_only && cli.agent_gate {
-            return Err(anyhow!("--scan-only and --agent-gate cannot be combined"));
+        let exclusive_modes = [cli.scan_only, cli.agent_gate, cli.benchmark]
+            .iter()
+            .filter(|enabled| **enabled)
+            .count();
+        if exclusive_modes > 1 {
+            return Err(anyhow!(
+                "--scan-only, --agent-gate, and --benchmark cannot be combined"
+            ));
         }
+        validate_price("benchmark-input-1m-cost", cli.benchmark_input_1m_cost)?;
+        validate_price("benchmark-output-1m-cost", cli.benchmark_output_1m_cost)?;
 
         let project_root = cli
             .target
@@ -225,6 +258,11 @@ impl Config {
             ignores,
             scan_only: cli.scan_only,
             agent_gate: cli.agent_gate,
+            benchmark: cli.benchmark,
+            benchmark_output: cli.benchmark_output,
+            benchmark_input_1m_cost: cli.benchmark_input_1m_cost,
+            benchmark_output_1m_cost: cli.benchmark_output_1m_cost,
+            benchmark_estimated_output_tokens: cli.benchmark_estimated_output_tokens.unwrap_or(0),
             endpoint: env_value(&env_file, ENV_ENDPOINT)
                 .or(file.endpoint)
                 .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
@@ -835,6 +873,15 @@ fn env_u64(env_file: &BTreeMap<String, String>, key: &str) -> Option<u64> {
     env_value(env_file, key).and_then(|v| v.parse().ok())
 }
 
+fn validate_price(name: &str, value: Option<f64>) -> Result<()> {
+    if let Some(price) = value
+        && (!price.is_finite() || price < 0.0)
+    {
+        return Err(anyhow!("{name} must be a non-negative finite number"));
+    }
+    Ok(())
+}
+
 fn read_key_file(path: &Path) -> Result<String> {
     let key = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("cannot read api key file {}: {e}", path.display()))?;
@@ -1108,6 +1155,29 @@ max_retries=2
     }
 
     #[test]
+    fn cli_parses_benchmark_pricing_flags() {
+        let parsed = Cli::try_parse_from([
+            "sift",
+            "--benchmark",
+            "--benchmark-input-1m-cost",
+            "0.25",
+            "--benchmark-output-1m-cost",
+            "1.00",
+            "--benchmark-estimated-output-tokens",
+            "1000",
+        ]);
+        assert!(parsed.is_ok());
+        let cli = match parsed {
+            Ok(cli) => cli,
+            Err(_) => return,
+        };
+        assert!(cli.benchmark);
+        assert_eq!(cli.benchmark_input_1m_cost, Some(0.25));
+        assert_eq!(cli.benchmark_output_1m_cost, Some(1.0));
+        assert_eq!(cli.benchmark_estimated_output_tokens, Some(1000));
+    }
+
+    #[test]
     fn self_audit_flag_is_not_public_cli_argument() {
         let help = Cli::command().render_long_help().to_string();
         assert!(!help.contains("--self-audit"));
@@ -1180,6 +1250,11 @@ model = "gpt-oss"
             ignores: Vec::new(),
             scan_only: false,
             agent_gate: false,
+            benchmark: false,
+            benchmark_output: None,
+            benchmark_input_1m_cost: None,
+            benchmark_output_1m_cost: None,
+            benchmark_estimated_output_tokens: 0,
             endpoint: DEFAULT_ENDPOINT.to_string(),
             model: DEFAULT_LARGE_MODEL.to_string(),
             small_endpoint: DEFAULT_ENDPOINT.to_string(),
@@ -1209,6 +1284,11 @@ model = "gpt-oss"
             max_bytes: None,
             scan_only: true,
             agent_gate: false,
+            benchmark: false,
+            benchmark_output: None,
+            benchmark_input_1m_cost: None,
+            benchmark_output_1m_cost: None,
+            benchmark_estimated_output_tokens: None,
             report_language: ReportLanguage::En,
             debug: false,
         };
@@ -1230,6 +1310,11 @@ model = "gpt-oss"
             max_bytes: None,
             scan_only: true,
             agent_gate: false,
+            benchmark: false,
+            benchmark_output: None,
+            benchmark_input_1m_cost: None,
+            benchmark_output_1m_cost: None,
+            benchmark_estimated_output_tokens: None,
             report_language: ReportLanguage::En,
             debug: false,
         };
@@ -1241,6 +1326,11 @@ model = "gpt-oss"
             ignores: Vec::new(),
             scan_only: true,
             agent_gate: false,
+            benchmark: false,
+            benchmark_output: None,
+            benchmark_input_1m_cost: None,
+            benchmark_output_1m_cost: None,
+            benchmark_estimated_output_tokens: 0,
             endpoint: String::new(),
             model: String::new(),
             small_endpoint: String::new(),
@@ -1268,6 +1358,11 @@ model = "gpt-oss"
             max_bytes: None,
             scan_only: true,
             agent_gate: true,
+            benchmark: false,
+            benchmark_output: None,
+            benchmark_input_1m_cost: None,
+            benchmark_output_1m_cost: None,
+            benchmark_estimated_output_tokens: None,
             report_language: ReportLanguage::En,
             debug: false,
         };
@@ -1275,6 +1370,50 @@ model = "gpt-oss"
         let err = Config::resolve(cli).err().map(|e| e.to_string());
 
         assert!(err.unwrap_or_default().contains("--agent-gate"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn benchmark_mode_is_exclusive_and_prices_are_validated() {
+        let root = unique_test_dir("benchmark-conflict");
+        std::fs::create_dir_all(&root).ok();
+        let cli = Cli {
+            target: root.clone(),
+            module: None,
+            api_key_file: None,
+            concurrency: None,
+            max_bytes: None,
+            scan_only: true,
+            agent_gate: false,
+            benchmark: true,
+            benchmark_output: None,
+            benchmark_input_1m_cost: None,
+            benchmark_output_1m_cost: None,
+            benchmark_estimated_output_tokens: None,
+            report_language: ReportLanguage::En,
+            debug: false,
+        };
+        let err = Config::resolve(cli).err().map(|e| e.to_string());
+        assert!(err.unwrap_or_default().contains("--benchmark"));
+
+        let cli = Cli {
+            target: root.clone(),
+            module: None,
+            api_key_file: None,
+            concurrency: None,
+            max_bytes: None,
+            scan_only: false,
+            agent_gate: false,
+            benchmark: true,
+            benchmark_output: None,
+            benchmark_input_1m_cost: Some(-0.1),
+            benchmark_output_1m_cost: None,
+            benchmark_estimated_output_tokens: None,
+            report_language: ReportLanguage::En,
+            debug: false,
+        };
+        let err = Config::resolve(cli).err().map(|e| e.to_string());
+        assert!(err.unwrap_or_default().contains("benchmark-input-1m-cost"));
         std::fs::remove_dir_all(root).ok();
     }
 

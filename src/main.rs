@@ -18,6 +18,7 @@ use serde::Serialize;
 use config::{Cli, Config, ReportLanguage};
 
 fn main() -> ExitCode {
+    let run_started = Instant::now();
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("doctor")) {
         return if config::run_doctor() {
             ExitCode::SUCCESS
@@ -42,11 +43,12 @@ fn main() -> ExitCode {
 
     eprintln!("audit root: {}", cfg.root.display());
     eprintln!(
-        "concurrency: {}  max_file_bytes: {}  scan_only: {}  agent_gate: {}  report_language: {}  debug: {}",
+        "concurrency: {}  max_file_bytes: {}  scan_only: {}  agent_gate: {}  benchmark: {}  report_language: {}  debug: {}",
         cfg.concurrency,
         cfg.max_bytes,
         cfg.scan_only,
         cfg.agent_gate,
+        cfg.benchmark,
         cfg.report_language.code(),
         cfg.debug
     );
@@ -64,8 +66,8 @@ fn main() -> ExitCode {
         );
     }
 
-    let needs_model = !(cfg.scan_only || cfg.agent_gate);
-    let needs_seed = needs_model || cfg.agent_gate;
+    let needs_model = !(cfg.scan_only || cfg.agent_gate || cfg.benchmark);
+    let needs_seed = needs_model || cfg.agent_gate || cfg.benchmark;
     let mut reg = if !needs_model {
         None
     } else {
@@ -153,10 +155,12 @@ fn main() -> ExitCode {
         scan.unsupported_files,
         scan.parse_failed
     );
+    let scan_elapsed_ms = elapsed_ms(scan_started);
 
     if reg.is_some() {
         eprintln!("preparing model seed");
     }
+    let small_model_chunks_total = seed_batches(&seed_records, 16 * 1024).len();
     let seed_batches = seed_batches(&seed_records, SEED_CAP);
     let seed = seed_records.join("\n");
     let seed_bytes = seed_batches
@@ -190,6 +194,34 @@ fn main() -> ExitCode {
                 .join(",");
             eprintln!("debug: reduce_batch_bytes=[{batch_bytes}]");
         }
+    }
+
+    if cfg.benchmark {
+        let report = BenchmarkReport::from_run(
+            &cfg,
+            &coverage,
+            scan_elapsed_ms,
+            small_model_chunks_total,
+            elapsed_ms(run_started),
+            resident_memory_metric(),
+        );
+        let json = match serde_json::to_string_pretty(&report) {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("benchmark serialization failed: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if let Some(path) = &cfg.benchmark_output {
+            if let Err(e) = std::fs::write(path, format!("{json}\n")) {
+                eprintln!("benchmark output failed: {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+            eprintln!("benchmark report: {}", path.display());
+        } else {
+            println!("{json}");
+        }
+        return ExitCode::SUCCESS;
     }
 
     if cfg.agent_gate {
@@ -341,6 +373,246 @@ fn run_internal_gate(target: PathBuf) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[derive(Serialize)]
+struct BenchmarkReport {
+    schema_version: u8,
+    repo: BenchmarkRepo,
+    scan: BenchmarkScan,
+    memory: BenchmarkMemory,
+    seed: BenchmarkSeed,
+    model: BenchmarkModel,
+    tokens: BenchmarkTokens,
+    cost: BenchmarkCost,
+    notes: Vec<&'static str>,
+}
+
+#[derive(Serialize)]
+struct BenchmarkRepo {
+    path: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct BenchmarkScan {
+    candidate_files: usize,
+    dehydrated_files: usize,
+    unsupported_files: usize,
+    read_failed: usize,
+    parse_failed: usize,
+    serialization_failed: usize,
+    wall_clock_ms: u128,
+    total_wall_clock_ms: u128,
+    max_file_bytes: u64,
+    concurrency: usize,
+}
+
+#[derive(Serialize)]
+struct BenchmarkMemory {
+    resident_set_peak_kib: Option<u64>,
+    source: String,
+}
+
+#[derive(Serialize)]
+struct BenchmarkSeed {
+    records_sent: usize,
+    candidate_bytes: usize,
+    bytes_sent: usize,
+    seed_cap_bytes: usize,
+    reduce_batches: usize,
+    record_truncated: usize,
+}
+
+#[derive(Serialize)]
+struct BenchmarkModel {
+    small_model: BenchmarkSmallModel,
+    large_model: BenchmarkLargeModel,
+}
+
+#[derive(Serialize)]
+struct BenchmarkSmallModel {
+    chunks_total: usize,
+    attempts_total: usize,
+    chunks_failed: usize,
+    skipped_no_model: bool,
+}
+
+#[derive(Serialize)]
+struct BenchmarkLargeModel {
+    calls: usize,
+    reduce_batches_planned: usize,
+}
+
+#[derive(Serialize)]
+struct BenchmarkTokens {
+    estimation: &'static str,
+    estimated_input_tokens: u64,
+    estimated_output_tokens: u64,
+}
+
+#[derive(Serialize)]
+struct BenchmarkCost {
+    currency: &'static str,
+    configured: bool,
+    input_per_million: Option<f64>,
+    output_per_million: Option<f64>,
+    estimated_input_cost: Option<f64>,
+    estimated_output_cost: Option<f64>,
+    estimated_total_cost: Option<f64>,
+}
+
+impl BenchmarkReport {
+    fn from_run(
+        cfg: &Config,
+        coverage: &InputCoverage,
+        scan_elapsed_ms: u128,
+        small_model_chunks_total: usize,
+        total_elapsed_ms: u128,
+        memory: BenchmarkMemory,
+    ) -> Self {
+        let estimated_input_tokens = estimate_tokens_from_bytes(coverage.seed_bytes);
+        let estimated_output_tokens = cfg.benchmark_estimated_output_tokens;
+        let cost = BenchmarkCost::new(
+            estimated_input_tokens,
+            estimated_output_tokens,
+            cfg.benchmark_input_1m_cost,
+            cfg.benchmark_output_1m_cost,
+        );
+        Self {
+            schema_version: 1,
+            repo: BenchmarkRepo {
+                path: cfg.root.display().to_string(),
+                name: cfg
+                    .root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+            },
+            scan: BenchmarkScan {
+                candidate_files: coverage.scan.candidate_files,
+                dehydrated_files: coverage.dehydrated,
+                unsupported_files: coverage.scan.unsupported_files,
+                read_failed: coverage.scan.read_failed,
+                parse_failed: coverage.scan.parse_failed,
+                serialization_failed: coverage.scan.serialization_failed,
+                wall_clock_ms: scan_elapsed_ms,
+                total_wall_clock_ms: total_elapsed_ms,
+                max_file_bytes: cfg.max_bytes,
+                concurrency: cfg.concurrency,
+            },
+            memory,
+            seed: BenchmarkSeed {
+                records_sent: coverage.seeded,
+                candidate_bytes: coverage.candidate_seed_bytes,
+                bytes_sent: coverage.seed_bytes,
+                seed_cap_bytes: coverage.seed_cap,
+                reduce_batches: coverage.batches,
+                record_truncated: coverage.record_truncated,
+            },
+            model: BenchmarkModel {
+                small_model: BenchmarkSmallModel {
+                    chunks_total: small_model_chunks_total,
+                    attempts_total: 0,
+                    chunks_failed: 0,
+                    skipped_no_model: true,
+                },
+                large_model: BenchmarkLargeModel {
+                    calls: 0,
+                    reduce_batches_planned: coverage.batches,
+                },
+            },
+            tokens: BenchmarkTokens {
+                estimation: "ceil(seed_bytes_sent / 4); tokenizer-free approximation",
+                estimated_input_tokens,
+                estimated_output_tokens,
+            },
+            cost,
+            notes: vec![
+                "benchmark mode performs no model calls",
+                "token and cost values are estimates unless provider usage data is supplied externally",
+            ],
+        }
+    }
+}
+
+impl BenchmarkCost {
+    fn new(
+        input_tokens: u64,
+        output_tokens: u64,
+        input_per_million: Option<f64>,
+        output_per_million: Option<f64>,
+    ) -> Self {
+        let input = estimate_cost(input_tokens, input_per_million);
+        let output = estimate_cost(output_tokens, output_per_million);
+        let configured = input_per_million.is_some() || output_per_million.is_some();
+        Self {
+            currency: "USD",
+            configured,
+            input_per_million,
+            output_per_million,
+            estimated_input_cost: input,
+            estimated_output_cost: output,
+            estimated_total_cost: if configured {
+                Some(input.unwrap_or(0.0) + output.unwrap_or(0.0))
+            } else {
+                None
+            },
+        }
+    }
+}
+
+fn estimate_tokens_from_bytes(bytes: usize) -> u64 {
+    u64::try_from(bytes.saturating_add(3) / 4).unwrap_or(u64::MAX)
+}
+
+fn estimate_cost(tokens: u64, per_million: Option<f64>) -> Option<f64> {
+    per_million.map(|price| (tokens as f64 / 1_000_000.0) * price)
+}
+
+fn elapsed_ms(started: Instant) -> u128 {
+    started.elapsed().as_millis()
+}
+
+fn resident_memory_metric() -> BenchmarkMemory {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(value) = linux_status_kib("VmHWM") {
+            return BenchmarkMemory {
+                resident_set_peak_kib: Some(value),
+                source: "procfs:VmHWM".to_string(),
+            };
+        }
+        if let Some(value) = linux_status_kib("VmRSS") {
+            return BenchmarkMemory {
+                resident_set_peak_kib: Some(value),
+                source: "procfs:VmRSS".to_string(),
+            };
+        }
+    }
+    BenchmarkMemory {
+        resident_set_peak_kib: None,
+        source: "unavailable".to_string(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_status_kib(key: &str) -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        let Some(value) = line
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(':'))
+        else {
+            continue;
+        };
+        return value
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse::<u64>().ok());
+    }
+    None
 }
 
 #[derive(Default)]

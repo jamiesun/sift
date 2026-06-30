@@ -72,10 +72,11 @@ fn main() -> ExitCode {
 
     eprintln!("audit root: {}", cfg.root.display());
     eprintln!(
-        "concurrency: {}  max_file_bytes: {}  scan_only: {}  self_audit: {}  report_language: {}  debug: {}",
+        "concurrency: {}  max_file_bytes: {}  scan_only: {}  agent_gate: {}  self_audit: {}  report_language: {}  debug: {}",
         cfg.concurrency,
         cfg.max_bytes,
         cfg.scan_only,
+        cfg.agent_gate,
         cfg.self_audit,
         cfg.report_language.code(),
         cfg.debug
@@ -94,7 +95,9 @@ fn main() -> ExitCode {
         );
     }
 
-    let mut reg = if cfg.scan_only {
+    let needs_model = !(cfg.scan_only || cfg.agent_gate);
+    let needs_seed = needs_model || cfg.agent_gate;
+    let mut reg = if !needs_model {
         None
     } else {
         let r = cfg.build_registry();
@@ -147,7 +150,7 @@ fn main() -> ExitCode {
         dehydrated += 1;
         match serde_json::to_string(&sum) {
             Ok(j) => {
-                if reg.is_some() {
+                if needs_seed {
                     seed_candidate_bytes =
                         seed_candidate_bytes.saturating_add(j.len().saturating_add(1));
                     match compact_seed_record(&sum, SEED_CAP) {
@@ -201,7 +204,7 @@ fn main() -> ExitCode {
         record_truncated: seed_record_truncated,
         batches: seed_batches.len(),
     };
-    if reg.is_some() {
+    if needs_seed {
         eprintln!(
             "seed prepared, records: {}  reduce_batches: {}  seed_bytes: {}  candidate_seed_bytes: {}  record_truncated: {}",
             coverage.seeded,
@@ -218,6 +221,16 @@ fn main() -> ExitCode {
                 .join(",");
             eprintln!("debug: reduce_batch_bytes=[{batch_bytes}]");
         }
+    }
+
+    if cfg.agent_gate {
+        let gate = report::agent_gate_from_seed(&seed, coverage.agent_gate_coverage());
+        println!("{}", gate.markdown);
+        return if gate.safe_to_agent_run {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
     }
 
     if reg.is_some() {
@@ -389,6 +402,18 @@ impl InputCoverage {
             self.seed_cap,
             self.record_truncated
         )
+    }
+
+    fn agent_gate_coverage(&self) -> report::AgentGateCoverage {
+        report::AgentGateCoverage {
+            candidate_files: self.scan.candidate_files,
+            dehydrated_files: self.dehydrated,
+            read_failed: self.scan.read_failed,
+            unsupported_files: self.scan.unsupported_files,
+            parse_failed: self.scan.parse_failed,
+            serialization_failed: self.scan.serialization_failed,
+            record_truncated: self.record_truncated,
+        }
     }
 }
 

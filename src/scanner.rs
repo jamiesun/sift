@@ -67,6 +67,7 @@ mod tests {
             concurrency: None,
             max_bytes: Some(128),
             scan_only: true,
+            agent_gate: false,
             report_language: crate::config::ReportLanguage::En,
             debug: false,
             self_audit: false,

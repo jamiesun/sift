@@ -92,6 +92,10 @@ pub struct Cli {
     #[arg(long)]
     pub scan_only: bool,
 
+    /// Run deterministic pre-run agent gate and do not call models
+    #[arg(long)]
+    pub agent_gate: bool,
+
     /// Markdown report language
     #[arg(long, alias = "report-lang", value_enum, default_value = "en")]
     pub report_language: ReportLanguage,
@@ -160,6 +164,7 @@ pub struct Config {
     pub max_bytes: u64,
     pub ignores: Vec<String>,
     pub scan_only: bool,
+    pub agent_gate: bool,
     pub endpoint: String,
     pub model: String,
     pub small_endpoint: String,
@@ -176,6 +181,10 @@ pub struct Config {
 impl Config {
     /// Resolve order: CLI key file > ENV > project .env > ~/.sift/config.toml; defaults fill non-secret fields.
     pub fn resolve(cli: Cli) -> Result<Self> {
+        if cli.scan_only && cli.agent_gate {
+            return Err(anyhow!("--scan-only and --agent-gate cannot be combined"));
+        }
+
         let project_root = cli
             .target
             .canonicalize()
@@ -220,6 +229,7 @@ impl Config {
             max_bytes,
             ignores,
             scan_only: cli.scan_only,
+            agent_gate: cli.agent_gate,
             endpoint: env_value(&env_file, ENV_ENDPOINT)
                 .or(file.endpoint)
                 .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
@@ -1166,6 +1176,7 @@ model = "gpt-oss"
             max_bytes: 1,
             ignores: Vec::new(),
             scan_only: false,
+            agent_gate: false,
             endpoint: DEFAULT_ENDPOINT.to_string(),
             model: DEFAULT_LARGE_MODEL.to_string(),
             small_endpoint: DEFAULT_ENDPOINT.to_string(),
@@ -1195,6 +1206,7 @@ model = "gpt-oss"
             concurrency: None,
             max_bytes: None,
             scan_only: true,
+            agent_gate: false,
             report_language: ReportLanguage::En,
             debug: false,
             self_audit: false,
@@ -1216,6 +1228,7 @@ model = "gpt-oss"
             concurrency: None,
             max_bytes: None,
             scan_only: true,
+            agent_gate: false,
             report_language: ReportLanguage::En,
             debug: false,
             self_audit: false,
@@ -1227,6 +1240,7 @@ model = "gpt-oss"
             max_bytes: 1,
             ignores: Vec::new(),
             scan_only: true,
+            agent_gate: false,
             endpoint: String::new(),
             model: String::new(),
             small_endpoint: String::new(),
@@ -1240,6 +1254,29 @@ model = "gpt-oss"
             env_file: BTreeMap::new(),
         });
         assert_eq!(cfg.root, module.canonicalize().unwrap_or(module));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn scan_only_and_agent_gate_cannot_be_combined() {
+        let root = unique_test_dir("agent-gate-conflict");
+        std::fs::create_dir_all(&root).ok();
+        let cli = Cli {
+            target: root.clone(),
+            module: None,
+            api_key_file: None,
+            concurrency: None,
+            max_bytes: None,
+            scan_only: true,
+            agent_gate: true,
+            report_language: ReportLanguage::En,
+            debug: false,
+            self_audit: false,
+        };
+
+        let err = Config::resolve(cli).err().map(|e| e.to_string());
+
+        assert!(err.unwrap_or_default().contains("--agent-gate"));
         std::fs::remove_dir_all(root).ok();
     }
 

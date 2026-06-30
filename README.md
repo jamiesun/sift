@@ -14,6 +14,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for full design.
 
 ```sh
 sift ./repo --scan-only        # scan layer only (no key needed)
+sift ./repo --agent-gate       # deterministic pre-run gate (no key needed)
 sift ./repo --module src        # audit a submodule
 SIFT_API_KEY=<KEY> sift ./repo  # full pipeline
 sift ./repo --api-key-file ~/.sift/key
@@ -22,6 +23,22 @@ sift ./repo --debug              # print extra diagnostics to stderr
 sift doctor                    # check config, key_env, and endpoint/key mismatches
 sift ./repo --self-audit        # local P5 gate, no model key needed
 ```
+
+`--agent-gate` is a local, deterministic repo-intake gate for agents and wrapper
+scripts. It writes only this stable contract to stdout:
+
+```text
+VERDICT: ACCEPT | CAUTION | REJECT | INCOMPLETE
+WHY:
+- <top evidence>
+BLOCKERS:
+- <file:line evidence or coverage blocker>
+SAFE_TO_AGENT_RUN: yes | no
+```
+
+The command exits `0` only when `SAFE_TO_AGENT_RUN: yes`; `CAUTION`,
+`REJECT`, and `INCOMPLETE` exit non-zero so callers can stop before setup,
+install, build, or run steps.
 
 On first run, sift creates `~/.sift/config.toml` from the built-in default
 template. The default file contains only non-secret settings; put model keys in

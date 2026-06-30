@@ -60,13 +60,13 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME//\//-}"
-          archive="sift-${version}-${{ matrix.asset }}.tar.gz"
+          archive="sift-${version}-${{ matrix.asset }}.tar.xz"
 
           mkdir -p dist/sift
           cp target/release/sift dist/sift/
           cp README.md config.example.toml dist/sift/
           cp -R docs dist/sift/docs
-          tar -C dist -czf "${archive}" sift
+          tar -C dist -cJf "${archive}" sift
           shasum -a 256 "${archive}" > "${archive}.sha256"
 
           echo "archive=${archive}" >> "$GITHUB_OUTPUT"
@@ -156,8 +156,8 @@ jobs:
             awk '{print $1; exit}' "$f"
           }
 
-          ARM_SHA="$(sha "sift-${TAG}-macos-arm64.tar.gz")"
-          AMD_SHA="$(sha "sift-${TAG}-macos-amd64.tar.gz")"
+          ARM_SHA="$(sha "sift-${TAG}-macos-arm64.tar.xz")"
+          AMD_SHA="$(sha "sift-${TAG}-macos-amd64.tar.xz")"
 
           # Tap repo is already checked out at ./tap with persisted credentials,
           # so the token never appears in a git remote URL or process arguments.
@@ -172,10 +172,10 @@ jobs:
 
             on_macos do
               if Hardware::CPU.arm?
-                url "${base}/sift-${TAG}-macos-arm64.tar.gz"
+                url "${base}/sift-${TAG}-macos-arm64.tar.xz"
                 sha256 "${ARM_SHA}"
               else
-                url "${base}/sift-${TAG}-macos-amd64.tar.gz"
+                url "${base}/sift-${TAG}-macos-amd64.tar.xz"
                 sha256 "${AMD_SHA}"
               end
             end

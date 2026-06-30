@@ -4,7 +4,7 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::model::{ModelClient, ModelSpec, Registry, Role, UreqTransport};
 
@@ -68,6 +68,9 @@ const DEFAULT_IGNORES: &[&str] = &[
     about = "Tiered audit: AST dehydration -> small-model Map -> large-model Reduce"
 )]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+
     /// Project root to audit
     #[arg(default_value = ".")]
     pub target: PathBuf,
@@ -87,6 +90,74 @@ pub struct Cli {
     /// Per-file byte limit; larger files are skipped
     #[arg(long)]
     pub max_bytes: Option<u64>,
+
+    /// Run only scan/dehydrate and do not call models
+    #[arg(long)]
+    pub scan_only: bool,
+
+    /// Run deterministic pre-run agent gate and do not call models
+    #[arg(long)]
+    pub agent_gate: bool,
+
+    /// Run scan/dehydrate benchmark telemetry and do not call models
+    #[arg(long)]
+    pub benchmark: bool,
+
+    /// Write benchmark JSON to this path instead of stdout
+    #[arg(long)]
+    pub benchmark_output: Option<PathBuf>,
+
+    /// Estimated input-token price per 1M tokens, in USD
+    #[arg(long)]
+    pub benchmark_input_1m_cost: Option<f64>,
+
+    /// Estimated output-token price per 1M tokens, in USD
+    #[arg(long)]
+    pub benchmark_output_1m_cost: Option<f64>,
+
+    /// Estimated output tokens to include in benchmark cost math
+    #[arg(long)]
+    pub benchmark_estimated_output_tokens: Option<u64>,
+
+    /// Markdown report language
+    #[arg(long, alias = "report-lang", value_enum, default_value = "en")]
+    pub report_language: ReportLanguage,
+
+    /// Print extra diagnostic progress to stderr
+    #[arg(long)]
+    pub debug: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CliCommand {
+    /// Safely inspect a GitHub repository before local setup or agent execution
+    Github(GithubCli),
+}
+
+#[derive(Debug, Args)]
+pub struct GithubCli {
+    /// GitHub repository as owner/repo or https://github.com/owner/repo
+    pub repo: String,
+
+    /// Branch, tag, or commit SHA to fetch
+    #[arg(long = "ref")]
+    pub ref_name: Option<String>,
+
+    /// Audit only this submodule path inside the fetched repository
+    #[arg(long)]
+    pub module: Option<PathBuf>,
+
+    /// Keep the temporary checkout and print its path
+    #[arg(long)]
+    pub keep_checkout: bool,
+
+    /// Explicit safety marker; repository code is never built
+    #[arg(long)]
+    pub no_build: bool,
+
+    /// Explicit safety marker; repository code is never installed
+    #[arg(long)]
+    pub no_install: bool,
 
     /// Run only scan/dehydrate and do not call models
     #[arg(long)]
@@ -1178,6 +1249,34 @@ max_retries=2
     }
 
     #[test]
+    fn cli_parses_github_subcommand_modes() {
+        let parsed = Cli::try_parse_from([
+            "sift",
+            "github",
+            "owner/repo",
+            "--ref",
+            "main",
+            "--agent-gate",
+            "--no-build",
+            "--no-install",
+        ]);
+        assert!(parsed.is_ok());
+        let cli = match parsed {
+            Ok(cli) => cli,
+            Err(_) => return,
+        };
+        assert!(matches!(cli.command, Some(CliCommand::Github(_))));
+        let Some(CliCommand::Github(github)) = cli.command else {
+            return;
+        };
+        assert_eq!(github.repo, "owner/repo");
+        assert_eq!(github.ref_name.as_deref(), Some("main"));
+        assert!(github.agent_gate);
+        assert!(github.no_build);
+        assert!(github.no_install);
+    }
+
+    #[test]
     fn self_audit_flag_is_not_public_cli_argument() {
         let help = Cli::command().render_long_help().to_string();
         assert!(!help.contains("--self-audit"));
@@ -1277,6 +1376,7 @@ model = "gpt-oss"
         std::fs::create_dir_all(root.join("src")).ok();
         std::fs::create_dir_all(&outside).ok();
         let cli = Cli {
+            command: None,
             target: root.clone(),
             module: Some(outside),
             api_key_file: None,
@@ -1303,6 +1403,7 @@ model = "gpt-oss"
         let module = root.join("src");
         std::fs::create_dir_all(&module).ok();
         let cli = Cli {
+            command: None,
             target: root.clone(),
             module: Some(module.clone()),
             api_key_file: None,
@@ -1351,6 +1452,7 @@ model = "gpt-oss"
         let root = unique_test_dir("agent-gate-conflict");
         std::fs::create_dir_all(&root).ok();
         let cli = Cli {
+            command: None,
             target: root.clone(),
             module: None,
             api_key_file: None,
@@ -1378,6 +1480,7 @@ model = "gpt-oss"
         let root = unique_test_dir("benchmark-conflict");
         std::fs::create_dir_all(&root).ok();
         let cli = Cli {
+            command: None,
             target: root.clone(),
             module: None,
             api_key_file: None,
@@ -1397,6 +1500,7 @@ model = "gpt-oss"
         assert!(err.unwrap_or_default().contains("--benchmark"));
 
         let cli = Cli {
+            command: None,
             target: root.clone(),
             module: None,
             api_key_file: None,

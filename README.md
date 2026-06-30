@@ -77,6 +77,12 @@ make githooks-install
 The pre-commit hook runs `make local-ci` before each commit. To bypass it for an
 intentional emergency commit, run `SIFT_SKIP_LOCAL_CI=1 git commit ...`.
 
+## Test Fixtures
+
+`tests/fixtures/repo-intake/` contains synthetic malicious and benign repository
+trees used by the deterministic `--agent-gate` regression suite. The fixture
+commands are inert examples and must never be executed as install scripts.
+
 macOS releases are published through the existing tap:
 
 ```sh

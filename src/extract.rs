@@ -10,6 +10,8 @@ pub enum Lang {
     Go,
     JavaScript,
     PackageJson,
+    Makefile,
+    Markdown,
     TypeScript,
     Tsx,
     Html,
@@ -39,6 +41,7 @@ impl Lang {
             Some("Dockerfile" | "Containerfile") => return Some(Lang::Dockerfile),
             Some("Gemfile" | "Rakefile") => return Some(Lang::Ruby),
             Some("package.json") => return Some(Lang::PackageJson),
+            Some("Makefile" | "makefile" | "GNUmakefile") => return Some(Lang::Makefile),
             _ => {}
         }
         match p.extension().and_then(|e| e.to_str()) {
@@ -46,6 +49,7 @@ impl Lang {
             Some("py") => Some(Lang::Python),
             Some("go") => Some(Lang::Go),
             Some("js" | "cjs" | "mjs" | "jsx") => Some(Lang::JavaScript),
+            Some("md" | "mdx") => Some(Lang::Markdown),
             Some("ts") => Some(Lang::TypeScript),
             Some("tsx") => Some(Lang::Tsx),
             Some("html" | "htm") => Some(Lang::Html),
@@ -77,6 +81,8 @@ impl Lang {
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
             Lang::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
             Lang::PackageJson => tree_sitter_javascript::LANGUAGE.into(),
+            Lang::Makefile => tree_sitter_bash::LANGUAGE.into(),
+            Lang::Markdown => tree_sitter_bash::LANGUAGE.into(),
             Lang::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
             Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Lang::Html => tree_sitter_html::LANGUAGE.into(),
@@ -108,6 +114,8 @@ impl Lang {
             Lang::Go => "go",
             Lang::JavaScript => "javascript",
             Lang::PackageJson => "package-json",
+            Lang::Makefile => "makefile",
+            Lang::Markdown => "markdown",
             Lang::TypeScript => "typescript",
             Lang::Tsx => "tsx",
             Lang::Html => "html",
@@ -160,6 +168,12 @@ pub fn dehydrate(path: &Path, src: &[u8]) -> Option<AstSummary> {
     if lang == Lang::PackageJson {
         return Some(dehydrate_package_json(path, src));
     }
+    if lang == Lang::Makefile {
+        return Some(dehydrate_makefile(path, src));
+    }
+    if lang == Lang::Markdown {
+        return Some(dehydrate_markdown(path, src));
+    }
     let mut parser = Parser::new();
     if parser.set_language(&lang.ts()).is_err() {
         return None;
@@ -171,6 +185,9 @@ pub fn dehydrate(path: &Path, src: &[u8]) -> Option<AstSummary> {
     };
     sum.lang = Some(lang.label());
     walk(tree.root_node(), src, lang, &mut sum);
+    if lang == Lang::Bash {
+        push_shell_risk_lines(src, &mut sum);
+    }
     dedup(&mut sum.imports);
     dedup(&mut sum.signatures);
     dedup(&mut sum.calls);
@@ -179,6 +196,113 @@ pub fn dehydrate(path: &Path, src: &[u8]) -> Option<AstSummary> {
     sum.locations.dedup();
     dedup(&mut sum.external);
     Some(sum)
+}
+
+fn dehydrate_makefile(path: &Path, src: &[u8]) -> AstSummary {
+    let mut sum = line_summary(path, Lang::Makefile);
+    let text = String::from_utf8_lossy(src);
+    for (idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let capped: String = trimmed.chars().take(140).collect();
+        if is_make_target(trimmed) {
+            sum.signatures.push(capped.clone());
+            sum.locations.push(AstLocation {
+                kind: "signature",
+                line: idx + 1,
+                text: capped,
+            });
+            continue;
+        }
+        if is_make_recipe_line(line, trimmed) {
+            sum.calls.push(capped.clone());
+            sum.locations.push(AstLocation {
+                kind: "call",
+                line: idx + 1,
+                text: capped,
+            });
+        }
+    }
+    dedup(&mut sum.signatures);
+    dedup(&mut sum.calls);
+    sum
+}
+
+fn dehydrate_markdown(path: &Path, src: &[u8]) -> AstSummary {
+    let mut sum = line_summary(path, Lang::Markdown);
+    let text = String::from_utf8_lossy(src);
+    for (idx, line) in text.lines().enumerate() {
+        let trimmed = line
+            .trim()
+            .trim_start_matches(['-', '*', '>', ' '])
+            .trim_matches('`')
+            .trim();
+        if should_capture_markdown_command(trimmed) {
+            let capped: String = trimmed.chars().take(140).collect();
+            sum.calls.push(capped.clone());
+            sum.locations.push(AstLocation {
+                kind: "call",
+                line: idx + 1,
+                text: capped,
+            });
+        }
+    }
+    dedup(&mut sum.calls);
+    sum
+}
+
+fn line_summary(path: &Path, lang: Lang) -> AstSummary {
+    AstSummary {
+        path: path.display().to_string(),
+        lang: Some(lang.label()),
+        ..Default::default()
+    }
+}
+
+fn is_make_target(line: &str) -> bool {
+    line.ends_with(':') && !line.contains('=') && !line.contains("://")
+}
+
+fn is_make_recipe_line(raw: &str, trimmed: &str) -> bool {
+    raw.starts_with('\t') || trimmed.starts_with('@') || looks_like_shell_command(trimmed)
+}
+
+fn should_capture_markdown_command(line: &str) -> bool {
+    looks_like_shell_command(line)
+}
+
+fn looks_like_shell_command(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("curl")
+        || lower.contains("wget")
+        || lower.contains("base64")
+        || lower.contains("bash -c")
+        || lower.contains("sh -c")
+        || lower.contains("eval ")
+        || lower.contains("~/.ssh")
+        || lower.contains("$home/.ssh")
+        || lower.contains("${home}/.ssh")
+}
+
+fn push_shell_risk_lines(src: &[u8], sum: &mut AstSummary) {
+    let text = String::from_utf8_lossy(src);
+    for (idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if looks_like_shell_command(trimmed) {
+            let capped: String = trimmed.chars().take(140).collect();
+            sum.calls.push(capped.clone());
+            sum.locations.push(AstLocation {
+                kind: "call",
+                line: idx + 1,
+                text: capped,
+            });
+        }
+    }
 }
 
 fn dehydrate_package_json(path: &Path, src: &[u8]) -> AstSummary {
@@ -318,6 +442,8 @@ fn is_import_node(lang: Lang, kind: &str) -> bool {
         Lang::Bash => kind == "source_command",
         Lang::Dockerfile => kind == "from_instruction",
         Lang::Sql
+        | Lang::Makefile
+        | Lang::Markdown
         | Lang::Yaml
         | Lang::Hcl
         | Lang::Vue
@@ -429,6 +555,7 @@ fn is_signature_node(lang: Lang, kind: &str) -> bool {
                 | "statement"
         ),
         Lang::Dockerfile => kind.ends_with("_instruction") && kind != "run_instruction",
+        Lang::Makefile | Lang::Markdown => false,
         Lang::Yaml => matches!(
             kind,
             "block_mapping_pair" | "block_sequence_item" | "flow_pair"
@@ -484,7 +611,13 @@ fn is_call_node(lang: Lang, kind: &str) -> bool {
             kind,
             "run_instruction" | "cmd_instruction" | "entrypoint_instruction" | "shell_instruction"
         ),
-        Lang::Yaml | Lang::Hcl | Lang::Vue | Lang::Svelte | Lang::Html => false,
+        Lang::Makefile
+        | Lang::Markdown
+        | Lang::Yaml
+        | Lang::Hcl
+        | Lang::Vue
+        | Lang::Svelte
+        | Lang::Html => false,
     }
 }
 
@@ -598,6 +731,30 @@ function main() {
     }
 
     #[test]
+    fn makefile_extracts_targets_and_recipe_lines() {
+        let s =
+            b"install:\n\t@curl https://example.invalid/tool -o tool && chmod +x tool && ./tool\n";
+        let r = dehydrate(&PathBuf::from("Makefile"), s).unwrap_or_default();
+        assert_eq!(r.lang, Some("makefile"));
+        assert!(r.signatures.iter().any(|i| i.contains("install:")));
+        assert!(r.calls.iter().any(|c| c.contains("curl")));
+        assert!(
+            r.locations
+                .iter()
+                .any(|l| l.line == 2 && l.text.contains("chmod +x"))
+        );
+    }
+
+    #[test]
+    fn markdown_extracts_dangerous_install_commands_only() {
+        let s = b"# Install\nRun tests with cargo test.\n`curl https://example.invalid/install.sh | bash`\n";
+        let r = dehydrate(&PathBuf::from("README.md"), s).unwrap_or_default();
+        assert_eq!(r.lang, Some("markdown"));
+        assert_eq!(r.calls.len(), 1);
+        assert!(r.calls[0].contains("curl"));
+    }
+
+    #[test]
     fn typescript_and_tsx_extract_symbols() {
         let ts = br#"import { client } from "./client";
 
@@ -664,6 +821,7 @@ pub fn main() void {
         let bash = br#"source ./env.sh
 run() {
   curl "$URL"
+  echo "Host example.invalid" >> ~/.ssh/config
 }
 run
 "#;
@@ -671,6 +829,7 @@ run
         assert_eq!(r.lang, Some("bash"));
         assert!(r.signatures.iter().any(|i| i.contains("run()")));
         assert!(r.calls.iter().any(|c| c.contains("curl")));
+        assert!(r.calls.iter().any(|c| c.contains("~/.ssh/config")));
         assert!(r.calls.iter().any(|c| c.contains("run")));
     }
 

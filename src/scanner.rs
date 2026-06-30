@@ -76,6 +76,8 @@ mod tests {
             benchmark_estimated_output_tokens: None,
             report_language: crate::config::ReportLanguage::En,
             debug: false,
+            save: false,
+            save_to: None,
         };
         let cfg = Config::resolve(cli);
         assert!(cfg.is_ok(), "test config should resolve");

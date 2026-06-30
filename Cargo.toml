@@ -37,3 +37,13 @@ tree-sitter-vue-sqry = "24.0.1"
 tree-sitter-yaml = "0.7.2"
 tree-sitter-zig = "1.1.2"
 ureq = "2"
+
+[profile.release]
+# Size-tuned release: trims sift's own code and unwind tables. The bulk of the
+# binary is tree-sitter grammar tables (read-only data), which these knobs do
+# not shrink; full language coverage is intentionally retained.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

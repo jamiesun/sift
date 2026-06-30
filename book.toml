@@ -10,5 +10,7 @@ create-missing = false
 
 [output.html]
 git-repository-url = "https://github.com/jamiesun/sift"
-edit-url-template = "https://github.com/jamiesun/sift/edit/master/docs/{path}"
+edit-url-template = "https://github.com/jamiesun/sift/edit/master/{path}"
 site-url = "/sift/"
+additional-css = ["docs/theme/language.css"]
+additional-js = ["docs/theme/language.js"]

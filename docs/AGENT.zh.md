@@ -1,6 +1,6 @@
 # AGENT.md — sift 贡献者手册
 
-> [English](../AGENT.md) | 中文
+> [English](en/AGENT.md) | 中文
 >
 > 给参与 sift 的人与 agent 的实现手册：铁律、结构、习惯的事实来源。画像/边界见 [ROADMAP.zh.md](ROADMAP.zh.md)。
 

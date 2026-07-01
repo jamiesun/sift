@@ -2,7 +2,7 @@
 
 ## English
 
-`sift` is a cost-controlled open-source project auditor for dependency and repository intake. It is built around a tiered funnel: static AST dehydration first, optional small-model filtering second, and large-model convergence only after the input has been reduced.
+`sift` is a cost-controlled open-source project auditor for dependency and repository intake. It is built around a tiered funnel: static AST dehydration first, deterministic local findings second, and large-model convergence only after the input has been reduced.
 
 The primary product surface is a local CLI that can inspect a project path or safely fetch a GitHub repository before setup, install, build, or agent execution:
 
@@ -25,7 +25,7 @@ SAFE_TO_AGENT_RUN: yes | no
 
 ## 中文
 
-`sift` 是一个面向依赖引入和仓库预审的可控成本开源项目审计器。它先做静态 AST 脱水，再按需使用小模型粗筛，最后只把压缩后的输入交给大模型收敛。
+`sift` 是一个面向依赖引入和仓库预审的可控成本开源项目审计器。它先做静态 AST 脱水，再生成确定性本地发现，最后只把压缩后的输入交给大模型收敛。
 
 主要入口是本地 CLI：可以审本地项目，也可以在 setup、install、build 或 agent 执行之前安全获取 GitHub 仓库并做门禁判断。
 

@@ -9,7 +9,7 @@
 
 A **cost-controlled** open-source project auditor. Before adopting a library, get a file/line-level risk ledger without trial-running it or force-feeding tens of thousands of lines into a frontier model.
 
-Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (structure extraction, coarse filtering) goes to zero-cost static parsing and cheap small models; heavy logic convergence goes to a frontier model; a ReACT state machine orchestrates both. Ships as a single binary, zero-config, auditing a **whole project** or a **single module**. **sift itself must pass its internal release gates.**
+Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (structure extraction, coarse filtering) currently goes to zero-cost static parsing and deterministic local rules; heavy logic convergence goes to a frontier model; a ReACT state machine orchestrates the Reduce pass over deterministic findings. Ships as a single binary, zero-config, auditing a **whole project** or a **single module**. **sift itself must pass its internal release gates.**
 
 - Architecture
 
@@ -23,7 +23,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
         ▼
   Models    multi-model registry · per-call hard timeout · breaker+backoff  [P2 ✓]
         ▼
-  ReACT scheduler (tool protocol, local coarse filter, retry≤N)      [P3 ✓]
+  ReACT scheduler (tool protocol, deterministic findings, retry≤N)   [P3 ✓]
         │  └─ large model (Reduce convergence) ─────────┘
         ▼
   Report    stdout Markdown risk list (line/call-chain)            [P4 started]
@@ -35,7 +35,7 @@ Core: **tiered funnel + compute mismatch + ReACT scheduling**. Grunt work (struc
 
 - **Zero-friction cold start.** `sift ./repo --scan-only` just runs; missing `~/.sift/config.toml` is created with non-secret defaults; no interactive prompts; exits with an injection hint if the key is missing.
 - **Cost-controlled & budgetable.** The deterministic baseline is local; the large model only sees the dehydrated skeleton when full audit is requested.
-- **Model orchestration.** A ReACT state machine chains local coarse filtering and large-model convergence; skills are compile-time local functions.
+- **Model orchestration.** A ReACT state machine chains deterministic findings and large-model convergence; skills are compile-time local functions.
 - **Multi-model + concurrency.** Multiple endpoints are configurable; scan/model concurrency remains bounded and observable.
 - **Never grind blindly.** Every external call has a hard timeout; repeated failures trip the breaker; on trip, back off / degrade or emit a partial report — never hang.
 - **Engineering-grade by default.** A clean-looking but incomplete audit is a defect. Any skipped input, truncation, fallback, partial model result, or invalid config must be visible and testable.
@@ -77,7 +77,7 @@ src/audit.rs      internal gate dimension scoring              [P5]
 ```toml
 concurrency = 8          # scan/model concurrency cap
 [[model]]
-role = "small"           # small=filter pool / large=convergence
+role = "small"           # reserved for experimental Map diagnostics
 endpoint = "..."
 key_env = "SIFT_SMALL_KEY"
 timeout_ms = 8000
@@ -89,7 +89,7 @@ key_env = "SIFT_API_KEY"
 timeout_ms = 60000
 max_retries = 1
 ```
-Resolve order: CLI key file > ENV > toml > default; no large key ⇒ exit. Missing small model degrades to AST-only fallback.
+Resolve order: CLI key file > ENV > toml > default; no large key ⇒ exit. The current full-audit path does not call small-role models by default; missing small models do not change the deterministic-ledger Reduce path.
 The default user config path is `~/.sift/config.toml`; it is created on first run from `config.example.toml`-equivalent defaults and must not contain raw secrets.
 
 ## Timeout, breaker & recovery (never grind)
@@ -123,7 +123,7 @@ Features: ModelClient trait, registry, role routing; per-call timeout, breaker, 
 ### P3 ReACT scheduler — done ✓
 Features: enum state machine, initial tool protocol prompt, large model emits `<TOOL_CALL>`, match-routes local skills via `$SEED`; retry≤N then partial. Bounds: compile-time skills, no dynamic load. Gate: bad JSON/unknown skill/N errors all trip; react.rs tested.
 
-### P4 Map+Reduce+report
+### P4 Deterministic Reduce+report
 Features: deterministic AST coarse ledger, Markdown renderer, real `[[model]]` TOML parsing, explicit input coverage, stable JSON agent-gate output, policy controls, artifact inventory, eval corpus, and clean stdout boundaries. Bounds: module mode slices root only; truncation and degraded model paths must be visible. Gate: hits seeded risks; module/project don't bleed; full-audit stdout contains only the report; invalid config fails; fake-endpoint full audit smoke proves the user-facing path.
 
 ### P5 Internal Quality Gate

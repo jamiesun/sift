@@ -5,7 +5,7 @@
 Cost-controlled open-source project auditor: **tiered funnel + compute mismatch + ReACT scheduling**. Before adopting a dependency, get a file/line-level risk ledger without force-feeding tens of thousands of lines into a frontier model.
 
 - Grunt work (structure extraction / deterministic coarse filtering) → tree-sitter + local rules
-- Logic convergence → frontier large model, orchestrated by a ReACT state machine
+- Logic convergence → frontier large model, orchestrated by a ReACT state machine over deterministic findings
 - Single binary, zero-config; audits a whole project or a single module; sift must pass its internal release gates
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for full design.
@@ -78,6 +78,10 @@ Full audits keep stdout reserved for the final Markdown report. Progress,
 status, and debug diagnostics are printed to stderr so long runs do not look
 stalled and downstream tools can still pipe stdout safely.
 
+The current full-audit path does not call small-model Map by default. It
+converges from the deterministic ledger with the configured large model, while
+the small-model Map implementation remains an experimental diagnostic path.
+
 `--benchmark` is a local telemetry mode for release notes and cost checks. It
 does not call models; stdout is stable JSON unless `--benchmark-output <path>`
 is used. The report includes candidate/dehydrated/skipped counts, scan timing,
@@ -134,7 +138,7 @@ brew install jamiesun/tap/sift
 
 ## Status
 
-P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool protocol, compile-time skills, retry→partial) done. P4 is in progress: local AST risk ledger, Markdown renderer, `[[model]]` config parsing, stable JSON gate output, policy, artifact inventory, and eval corpus are wired. Internal release gates write local reports under `reports/` for maintainers.
+P0 scaffold + P1 AST dehydrate + P2 model layer + P3 ReACT scheduler (tool protocol, compile-time skills, retry→partial) done. P4 is in progress: local AST risk ledger, Markdown renderer, `[[model]]` config parsing, stable JSON gate output, policy, artifact inventory, and eval corpus are wired. Full audits currently reduce deterministic findings with the large model; small-model Map is retained as inactive diagnostic code until it is reintroduced behind behavior-level gates. Internal release gates write local reports under `reports/` for maintainers.
 
 ## Docs
 

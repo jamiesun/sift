@@ -284,7 +284,7 @@ fn main() -> ExitCode {
     }
 
     if reg.is_some() {
-        eprintln!("small-model Map skipped: reduce now converges from deterministic findings");
+        eprintln!("small-model Map inactive: reduce converges from deterministic findings");
     }
     let react_batches = build_react_batches(&coverage, &seed_batches, cfg.report_language);
     let diagnostics = diagnostics_section(&coverage, None, cfg.report_language);
@@ -1652,6 +1652,8 @@ fn diagnostics_section(
             "| small_model_map | skipped_no_model | {} |\n",
             report.skipped_no_model
         ));
+    } else {
+        s.push_str("| small_model_map | status | inactive_deterministic_reduce |\n");
     }
     s.push_str(&format!("| reduce | batches | {} |\n", coverage.batches));
     s.push_str(&format!(
@@ -2312,13 +2314,12 @@ mod tests {
         std::fs::write(root.join(".gitmodules"), "[submodule \"x\"]\n").ok();
         std::fs::write(root.join("src/lib.rs"), "fn main() {}\n").ok();
 
-        let inspection =
-            inspect_checkout(&root, 10, 1024 * 1024).unwrap_or_else(|_| CheckoutInspection {
-                file_count: 0,
-                byte_size: 0,
-                has_submodules: false,
-                has_lfs: false,
-            });
+        let inspection = inspect_checkout(&root, 10, 1024 * 1024).unwrap_or(CheckoutInspection {
+            file_count: 0,
+            byte_size: 0,
+            has_submodules: false,
+            has_lfs: false,
+        });
         assert!(inspection.has_lfs);
         assert!(inspection.has_submodules);
         assert!(

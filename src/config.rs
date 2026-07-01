@@ -33,7 +33,9 @@ timeout_ms = 60000
 max_retries = 1
 ignores = ["node_modules", "target", "dist", "build", "vendor", ".venv", "__pycache__"]
 
-# Example multi-model configuration:
+# Example multi-model configuration. The current full-audit path uses the
+# large model for Reduce over deterministic findings; small-role models are
+# retained for experimental Map diagnostics and are not called by default.
 # [[model]]
 # role = "small"
 # endpoint = "http://127.0.0.1:11434/v1/chat/completions"
@@ -65,7 +67,7 @@ const DEFAULT_IGNORES: &[&str] = &[
 #[command(
     name = "sift",
     version,
-    about = "Tiered audit: AST dehydration -> small-model Map -> large-model Reduce"
+    about = "Tiered audit: AST dehydration -> deterministic ledger -> large-model Reduce"
 )]
 pub struct Cli {
     #[command(subcommand)]

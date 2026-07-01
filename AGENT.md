@@ -6,7 +6,7 @@
 
 ## What sift is
 
-A cost-controlled, single-binary open-source auditor: tree-sitter dehydration → small-model coarse filter (Map) → large-model convergence (Reduce), orchestrated by a ReACT state machine. Audits a whole project or one module. **sift must pass its internal release gates.**
+A cost-controlled, single-binary open-source auditor: tree-sitter dehydration → deterministic coarse ledger → large-model convergence (Reduce), orchestrated by a ReACT state machine. Audits a whole project or one module. Small-model Map code is retained as inactive diagnostic scaffolding until behavior-level gates reintroduce it. **sift must pass its internal release gates.**
 
 ## Hard Rules
 

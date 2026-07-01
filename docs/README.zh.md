@@ -5,7 +5,7 @@
 可控成本的开源项目审计器：**分级漏斗 + 算力错配 + ReACT 调度**。引入开源库前，不必生吞数万行代码进前沿大模型，就能拿到定位到文件/行号的风险账本。
 
 - 脏活（结构提取/确定性粗筛）→ tree-sitter + 本地规则
-- 逻辑收敛 → 前沿大模型，ReACT 状态机统一调度
+- 逻辑收敛 → 前沿大模型，ReACT 状态机基于确定性发现统一调度
 - 单二进制、零配置、可审项目或模块；sift 自身必须通过内部发布门禁
 
 详见 [ROADMAP.zh.md](ROADMAP.zh.md)。
@@ -71,6 +71,8 @@ script、hook、install 命令或 submodule。扫描前会检查 checkout 文件
 首次运行时，sift 会自动创建 `~/.sift/config.toml` 默认配置文件。默认配置只包含非密钥项；模型密钥放在环境变量里，或通过 `--api-key-file` 传入。
 
 完整审计的 stdout 只保留最终 Markdown 报告；进度、状态和 debug 诊断都走 stderr，长任务不会看起来像卡死，也不影响下游工具安全消费 stdout。
+
+当前完整审计默认不会调用小模型 Map。它会把确定性账本交给配置的大模型收敛；小模型 Map 实现保留为实验性诊断路径。
 
 `--benchmark` 是本地 telemetry 模式，用于 release note 和成本核算。
 它不会调用模型；默认向 stdout 输出稳定 JSON，也可以用

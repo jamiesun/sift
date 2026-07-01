@@ -5,7 +5,7 @@
 Cost-controlled open-source project auditor: **tiered funnel + compute mismatch + ReACT scheduling**. Before adopting a dependency, get a file/line-level risk ledger without force-feeding tens of thousands of lines into a frontier model.
 
 - Grunt work (structure extraction / deterministic coarse filtering) -> tree-sitter + local rules
-- Logic convergence -> frontier large model, orchestrated by a ReACT state machine
+- Logic convergence -> frontier large model, orchestrated by a ReACT state machine over deterministic findings
 - Single binary, zero-config; audits a whole project or a single module; sift must pass its internal release gates
 
 See [Roadmap](../ROADMAP.md) for full design.
@@ -48,6 +48,8 @@ The deterministic supply-chain layer currently flags npm install lifecycle scrip
 `sift github` accepts `owner/repo` or `https://github.com/owner/repo`, fetches a temporary checkout with `git`, resolves the commit SHA, then runs the local scan/gate/benchmark pipeline against that checkout. It never runs repository code, package manager commands, build scripts, hooks, install commands, or submodules. The checkout is inspected for file/byte limits, `.gitmodules`, and Git LFS indicators before scanning. Temporary checkouts are removed by default; use `--keep-checkout` only when you need to inspect the fetched tree.
 
 Project-local policy lives in `sift-policy.toml`. It supports `max_candidate_files`, `[[allowlist]]`, `[[denylist]]`, and `[[severity_override]]` entries keyed by `path`, `rule`, `severity`, and `reason`; applied policy decisions are shown in text and JSON gate output.
+
+The current full-audit path does not call small-model Map by default. It converges from the deterministic ledger with the configured large model, while the small-model Map implementation remains an experimental diagnostic path.
 
 ## Supported Languages
 

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-/// Model role: small runs Map filtering, large runs Reduce convergence.
+/// Model role: large runs Reduce convergence; small is reserved for optional Map diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -198,7 +198,7 @@ fn call_error_from_transport(e: &TransportError) -> CallError {
     }
 }
 
-/// Registry routes small Map calls and the single large Reduce call by role.
+/// Registry routes configured model clients by role.
 #[derive(Default)]
 pub struct Registry {
     pub small: Vec<ModelClient>,

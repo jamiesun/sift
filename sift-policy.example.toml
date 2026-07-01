@@ -10,6 +10,15 @@ path = "tests/fixtures/"
 rule = "download-execute"
 reason = "synthetic regression fixture"
 
+# The `[[allowlist]]` table also matches suspicious-artifact blockers (the
+# ARTIFACTS section of the agent gate): set `rule` to the artifact's `reason`
+# (e.g. `extensionless_or_binary_executable`, `binary_or_archive_extension`,
+# `large_opaque_file`) instead of a risk-finding rule name.
+[[allowlist]]
+path = ".githooks/pre-commit"
+rule = "extensionless_or_binary_executable"
+reason = "reviewed git hook, no extension by design"
+
 # Escalate rules or paths that are never acceptable in this organization.
 [[denylist]]
 path = ".github/workflows/"

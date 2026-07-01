@@ -1,0 +1,17 @@
+# Project-local policy for sift's own repository (see sift-policy.example.toml
+# for the full schema). This file allowlists artifacts that are reviewed and
+# known-benign, so `sift . --agent-gate` on sift's own tree reflects only real
+# open items instead of its own regression fixtures.
+
+# Real, reviewed git hook shipped in .githooks/ with no extension by design.
+[[allowlist]]
+path = ".githooks/pre-commit"
+rule = "extensionless_or_binary_executable"
+reason = "reviewed git hook checked into .githooks/, no extension by design"
+
+# Synthetic regression fixtures under tests/fixtures/repo-intake/ that exist
+# specifically to exercise the suspicious-artifact detector itself.
+[[allowlist]]
+path = "tests/fixtures/repo-intake/"
+rule = "binary_or_archive_extension"
+reason = "synthetic regression fixture for the suspicious-artifact detector"

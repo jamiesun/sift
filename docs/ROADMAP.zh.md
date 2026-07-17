@@ -65,6 +65,7 @@ src/main.rs       入口装配：解析→Config→调度→报表→退出码
 src/config.rs     降级寻址、多模型配置加载            [P0✓→P2扩]
 src/scanner.rs    Walk + 有界 channel                  [P0✓]
 src/extract.rs    tree-sitter 脱水 → AstSummary        [P1]
+src/query.rs      无状态证据检索(重扫+regex过滤)        [P1✓]
 src/model.rs      多模型注册表/客户端 trait/超时熔断    [P2✓]
 src/react.rs      ReACT 状态机 + 技能 enum/match        [P3 ✓]
 src/skills.rs     本地技能函数(粗筛/reduce收敛)         [P3 ✓→P4]

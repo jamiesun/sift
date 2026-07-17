@@ -21,7 +21,7 @@
 9. **TDD。** 每个 `src/*.rs` 自带单测；新子系统单测同建。
 10. **中英双语、默认英文。** 每文档有 ZH 副本(`docs/*.zh.md`)；英文为准，跨语言范围/命令/规则须一致。
 11. **禁止玩具门禁或虚假能力声明。** 脚手架代码必须明确标成 scaffold，并隔离在显式模式后面；只有行为级门禁证明后，才能算阶段完成。
-12. **输出契约稳定。** `--scan-only` 可以向 stdout 写 JSONL；完整审计的 stdout 只留给最终报告。进度、诊断、模型遥测走 stderr 或 reports，不能混进报告流。
+12. **输出契约稳定。** `--scan-only` 可以向 stdout 写 JSONL；`sift query` 向 stdout 写 grep 风格证据行或单个 JSON 文档；完整审计的 stdout 只留给最终报告。进度、诊断、模型遥测走 stderr 或 reports，不能混进报告流。
 13. **禁止静默降级。** 截断、跳过文件、模型回退、半成品报告、无效配置和解析失败，必须体现在输出、退出码或内部门禁证据里。无效配置文件必须失败，不能悄悄回默认值。
 14. **程序源码只用英文。** `src/` 内运行时字符串、prompt 和源码注释使用英文；双语用户文档保留在 `docs/*.zh.md`。
 
@@ -35,6 +35,7 @@
 | `src/config.rs` | 降级寻址、多模型配置 | P0 ✓→P2 |
 | `src/scanner.rs` | Walk + 有界通道 | P0 ✓ |
 | `src/extract.rs` | tree-sitter 脱水 → AstSummary | P1 ✓ |
+| `src/query.rs` | 无状态证据检索（重扫 + regex 过滤） | P1 ✓ |
 | `src/model.rs` | 模型注册表/客户端/超时/熔断 | P2 ✓ |
 | `src/react.rs` | ReACT 状态机 + 技能 match | P3 ✓ |
 | `src/skills.rs` | 本地技能函数(map/reduce) | P3 ✓→P4 |

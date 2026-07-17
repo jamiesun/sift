@@ -21,7 +21,7 @@ A cost-controlled, single-binary open-source auditor: tree-sitter dehydration �
 9. **TDD.** Each `src/*.rs` carries unit tests; build tests alongside new subsystems.
 10. **Bilingual docs, English default.** Every doc has a ZH twin (`docs/*.zh.md`); EN is canonical, scope/commands/rules must match across languages.
 11. **No toy gates or fake capability claims.** Scaffold code must be named as scaffold, isolated behind explicit modes, and must not be counted as a completed phase until behavior-level gates prove it.
-12. **Stable output contracts.** `--scan-only` may write JSONL to stdout; full audit stdout is reserved for the final report. Progress, diagnostics, and model telemetry go to stderr or reports, never mixed into the report stream.
+12. **Stable output contracts.** `--scan-only` may write JSONL to stdout; `sift query` writes grep-style evidence lines or a single JSON document to stdout; full audit stdout is reserved for the final report. Progress, diagnostics, and model telemetry go to stderr or reports, never mixed into the report stream.
 13. **No silent degradation.** Truncation, skipped files, model fallback, partial reports, invalid config, and parse failures must be visible in output, exit status, or internal gate evidence. Invalid config files fail; they do not quietly revert to defaults.
 14. **Program source is English-only.** Runtime strings, prompts, and source comments in `src/` are English. Bilingual user docs stay in `docs/*.zh.md`.
 
@@ -35,6 +35,7 @@ A cost-controlled, single-binary open-source auditor: tree-sitter dehydration �
 | `src/config.rs` | fallback resolve, multi-model config | P0 ✓→P2 |
 | `src/scanner.rs` | Walk + bounded channel | P0 ✓ |
 | `src/extract.rs` | tree-sitter dehydrate → AstSummary | P1 ✓ |
+| `src/query.rs` | stateless evidence query (rescan + regex filters) | P1 ✓ |
 | `src/model.rs` | model registry/client/timeout/breaker | P2 ✓ |
 | `src/react.rs` | ReACT state machine + skill match | P3 ✓ |
 | `src/skills.rs` | local skill fns (map/reduce) | P3 ✓→P4 |

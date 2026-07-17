@@ -20,6 +20,9 @@ sift ./repo --benchmark        # scan/model budget telemetry JSON (no key needed
 sift github owner/repo         # safe GitHub intake, defaults to --agent-gate
 sift github owner/repo --ref main --scan-only
 sift eval-corpus               # run the checked-in repo-intake precision corpus
+sift query ./repo --calls 'exec|spawn'          # stateless evidence query → file:line
+sift query ./repo --imports reqwest --lang rust # who imports reqwest, rust files only
+sift query ./repo --any 'curl|wget' --format json
 sift ./repo --module src        # audit a submodule
 SIFT_API_KEY=<KEY> sift ./repo  # full pipeline
 sift ./repo --api-key-file ~/.sift/key
@@ -49,6 +52,17 @@ contains `verdict`, `safe_to_agent_run`, `exit_reason`, `coverage`, `findings`,
 The command exits `0` only when `SAFE_TO_AGENT_RUN: yes`; `CAUTION`,
 `REJECT`, and `INCOMPLETE` exit non-zero so callers can stop before setup,
 install, build, or run steps.
+
+`sift query` is a stateless retrieval view over the same dehydrated evidence
+that `--scan-only` streams. Every invocation re-runs the local scan (seconds,
+no key, no index or cache) and filters the evidence with flat regex flags:
+`--calls`, `--imports`, `--signatures`, `--external`, `--any`, plus `--lang`
+and `--path` record filters. Multiple flags AND together at the file level.
+Text output is grep-style `path:line: kind: text` evidence; `--format json`
+emits one document with `schema_version`, the echoed `query`, `coverage`,
+match counts, and `matches`. Emitted evidence is capped by `--limit`
+(default 200) with visible truncation. Exit codes follow grep: `0` matched,
+`1` no matches, `2` usage or configuration errors.
 
 The deterministic supply-chain layer currently flags npm install lifecycle
 scripts, manifest/lockfile reproducibility gaps, git/path/http dependency

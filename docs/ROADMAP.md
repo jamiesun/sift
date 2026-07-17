@@ -65,6 +65,7 @@ src/main.rs       entry wiring: parse→Config→schedule→report→exit code
 src/config.rs     fallback resolve, multi-model config         [P0✓→P2]
 src/scanner.rs    Walk + bounded channel                       [P0✓]
 src/extract.rs    tree-sitter dehydrate → AstSummary           [P1✓]
+src/query.rs      stateless evidence query (rescan + regex)    [P1✓]
 src/model.rs      multi-model registry/client trait/timeout    [P2✓]
 src/react.rs      ReACT state machine + skill enum/match       [P3 ✓]
 src/skills.rs     local skill fns (coarse filter / reduce)     [P3 ✓→P4]

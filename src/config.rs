@@ -148,6 +148,63 @@ pub enum CliCommand {
     Github(GithubCli),
     /// Run the checked-in repo-intake evaluation corpus
     EvalCorpus(EvalCorpusCli),
+    /// Query dehydrated scan evidence with regex filters; stateless, no model calls
+    Query(QueryCli),
+}
+
+#[derive(Debug, Args)]
+pub struct QueryCli {
+    /// Project root to query
+    #[arg(default_value = ".")]
+    pub target: PathBuf,
+
+    /// Query only this submodule path inside the project root
+    #[arg(long)]
+    pub module: Option<PathBuf>,
+
+    /// Regex matched against call evidence
+    #[arg(long)]
+    pub calls: Option<String>,
+
+    /// Regex matched against import evidence
+    #[arg(long)]
+    pub imports: Option<String>,
+
+    /// Regex matched against signature evidence
+    #[arg(long)]
+    pub signatures: Option<String>,
+
+    /// Regex matched against external boundary references
+    #[arg(long)]
+    pub external: Option<String>,
+
+    /// Regex matched against evidence of any kind
+    #[arg(long)]
+    pub any: Option<String>,
+
+    /// Only include files with this language label (e.g. rust, bash, manifest)
+    #[arg(long)]
+    pub lang: Option<String>,
+
+    /// Regex matched against the relative file path
+    #[arg(long)]
+    pub path: Option<String>,
+
+    /// Output format
+    #[arg(long, value_enum, default_value = "text")]
+    pub format: OutputFormat,
+
+    /// Maximum evidence lines to emit; 0 means unlimited
+    #[arg(long, default_value_t = 200)]
+    pub limit: usize,
+
+    /// Per-file byte limit; larger files are skipped
+    #[arg(long)]
+    pub max_bytes: Option<u64>,
+
+    /// Print extra diagnostic progress to stderr
+    #[arg(long)]
+    pub debug: bool,
 }
 
 #[derive(Debug, Args)]

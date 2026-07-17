@@ -2,6 +2,7 @@ mod audit;
 mod config;
 mod extract;
 mod model;
+mod query;
 mod react;
 mod report;
 mod scanner;
@@ -37,6 +38,7 @@ fn main() -> ExitCode {
         return match command {
             CliCommand::Github(github) => run_github_intake(github),
             CliCommand::EvalCorpus(eval) => run_eval_corpus(eval),
+            CliCommand::Query(q) => query::run_query(q),
         };
     }
 
